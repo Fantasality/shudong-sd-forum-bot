@@ -1,0 +1,1767 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>鼠洞SD 控制台</title>
+<style>
+  :root{
+    --bg:#0a0c11; --bg2:#0e1117; --panel:#13171f; --panel2:#171d27;
+    --line:#232a37; --line2:#2e3646;
+    --text:#e8ebf2; --dim:#8791a5; --dim2:#5f6879;
+    --accent:#8b5cf6; --accent2:#22d3ee;
+    --ok:#3ddc97; --warn:#f5b95c; --bad:#f87171;
+    --mono:ui-monospace,SFMono-Regular,Consolas,"Courier New",monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg); color:var(--text);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+    display:grid; grid-template-columns:196px 1fr; grid-template-rows:auto 1fr;
+    grid-template-areas:"top top" "side main"; height:100vh; overflow:hidden;
+  }
+  /* ---------- 顶栏 ---------- */
+  .topbar{
+    grid-area:top; display:flex; align-items:center; justify-content:space-between;
+    padding:12px 20px; background:var(--bg2); border-bottom:1px solid var(--line);
+    gap:16px; flex-wrap:wrap;
+  }
+  .brand{display:flex;align-items:center;gap:12px}
+  .logo{
+    width:36px;height:36px;border-radius:10px;flex:none;
+    background:linear-gradient(150deg,var(--accent),#5b21b6);
+    display:grid;place-items:center;font-weight:700;font-size:17px;
+    box-shadow:0 4px 14px -4px rgba(139,92,246,.7);
+  }
+  .brand h1{font-size:15px;font-weight:650;letter-spacing:.02em}
+  .brand .sub{font-size:11.5px;color:var(--dim);margin-top:1px}
+  .top-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .pill{
+    display:inline-flex;align-items:center;gap:6px;
+    padding:5px 11px;border-radius:999px;background:var(--panel);
+    border:1px solid var(--line);font-size:12px;color:var(--dim);
+    font-variant-numeric:tabular-nums;
+  }
+  .pill b{color:var(--text);font-weight:600}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--dim2);flex:none}
+  .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .dot.off{background:var(--dim2)}
+  .dot.bad{background:var(--bad)}
+  /* dry 开关 */
+  .dry-wrap{
+    display:flex;align-items:center;gap:10px;padding:5px 6px 5px 14px;
+    border-radius:10px;background:var(--panel);border:1px solid var(--line);
+    cursor:pointer;user-select:none;transition:.16s;
+  }
+  .dry-wrap:hover{border-color:var(--line2)}
+  .dry-wrap.live{border-color:rgba(248,113,113,.5);background:rgba(248,113,113,.08)}
+  .dry-label{font-size:12px;font-weight:700;letter-spacing:.08em;color:var(--warn)}
+  .dry-wrap.live .dry-label{color:var(--bad)}
+  .switch{position:relative;width:40px;height:22px;flex:none}
+  .switch input{opacity:0;width:0;height:0;position:absolute}
+  .track{
+    position:absolute;inset:0;border-radius:999px;background:#2a3140;
+    transition:.18s;border:1px solid var(--line2);
+  }
+  .thumb{
+    position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;
+    background:var(--dim);transition:.18s;
+  }
+  .switch input:checked + .track{background:rgba(248,113,113,.25);border-color:var(--bad)}
+  .switch input:checked + .track .thumb{left:21px;background:var(--bad)}
+  /* 普通启用开关用绿色，红色只留给 dry/LIVE */
+  .switch.ok input:checked + .track{background:rgba(61,220,151,.22);border-color:var(--ok)}
+  .switch.ok input:checked + .track .thumb{left:21px;background:var(--ok)}
+  /* ---------- 侧栏 ---------- */
+  .sidebar{
+    grid-area:side;background:var(--bg2);border-right:1px solid var(--line);
+    padding:14px 10px;display:flex;flex-direction:column;gap:3px;overflow-y:auto;
+  }
+  .nav-item{
+    display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:9px;
+    color:var(--dim);cursor:pointer;font-size:13.5px;transition:.14s;border:1px solid transparent;
+  }
+  .nav-item:hover{background:var(--panel);color:var(--text)}
+  .nav-item.active{background:rgba(139,92,246,.14);color:#c4b5fd;border-color:rgba(139,92,246,.3)}
+  .nav-item .ic{width:16px;text-align:center;font-size:14px;opacity:.9}
+  .nav-foot{margin-top:auto;padding:10px 12px;font-size:11px;color:var(--dim2);line-height:1.7}
+  /* ---------- 主区 ---------- */
+  main{grid-area:main;overflow-y:auto;padding:22px 24px 60px}
+  .page{display:none;max-width:1080px;margin:0 auto}
+  /* 不用入场动画：慢机器/截图时容易停在半透明状态 */
+  .page.active{display:block}
+  .page-head{display:flex;align-items:baseline;gap:12px;margin-bottom:18px;flex-wrap:wrap}
+  .page-head h2{font-size:17px;font-weight:650}
+  .page-head .hint{font-size:12.5px;color:var(--dim)}
+  .page-head .grow{margin-left:auto;display:flex;gap:8px}
+  /* 卡片 */
+  .card{
+    background:var(--panel);border:1px solid var(--line);border-radius:13px;
+    padding:16px 18px;margin-bottom:14px;
+  }
+  .card-h{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+  .card-h h3{font-size:14px;font-weight:600}
+  .card-h .grow{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .card.note{background:rgba(245,185,92,.06);border-color:rgba(245,185,92,.25)}
+  .card.note .card-h h3{color:var(--warn)}
+  /* 统计 */
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:14px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:14px 16px}
+  .stat .k{font-size:11.5px;color:var(--dim);letter-spacing:.04em}
+  .stat .v{font-size:23px;font-weight:680;margin-top:5px;font-variant-numeric:tabular-nums}
+  .stat .v small{font-size:12px;color:var(--dim2);font-weight:500}
+  .bar{height:3px;border-radius:2px;background:#242b38;margin-top:9px;overflow:hidden}
+  .bar > i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:2px;transition:.3s}
+  /* 表单 */
+  label.f{display:block;font-size:11.5px;color:var(--dim);margin-bottom:5px;letter-spacing:.03em}
+  input[type=text],input[type=number],input[type=password],textarea,select{
+    width:100%;background:var(--bg2);border:1px solid var(--line);color:var(--text);
+    border-radius:9px;padding:9px 11px;font-size:13px;font-family:inherit;outline:none;
+    transition:.14s;
+  }
+  input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(139,92,246,.12)}
+  textarea{resize:vertical;line-height:1.65}
+  .mono{font-family:var(--mono);font-size:12px}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .row > *{flex:1;min-width:110px}
+  .btn{
+    display:inline-flex;align-items:center;gap:6px;justify-content:center;
+    padding:8px 15px;border-radius:9px;border:1px solid var(--line2);
+    background:var(--panel2);color:var(--text);font-size:13px;font-family:inherit;
+    cursor:pointer;transition:.14s;white-space:nowrap;
+  }
+  .btn:hover{background:#1e2530;border-color:#3a4457}
+  .btn:active{transform:translateY(1px)}
+  .btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+  .btn.primary{background:linear-gradient(160deg,#7c5cff,#6d3fe0);border-color:#7c5cff;color:#fff;font-weight:550}
+  .btn.primary:hover{filter:brightness(1.1)}
+  .btn.danger{background:rgba(248,113,113,.1);border-color:rgba(248,113,113,.4);color:#fca5a5}
+  .btn.danger:hover{background:rgba(248,113,113,.2)}
+  .btn.ghost{background:transparent}
+  .btn.sm{padding:5px 11px;font-size:12px;border-radius:7px}
+  /* 任务卡 */
+  .task{background:var(--panel);border:1px solid var(--line);border-radius:13px;margin-bottom:12px;overflow:hidden}
+  .task.on{border-color:rgba(61,220,151,.32)}
+  .task-h{display:flex;align-items:center;gap:12px;padding:14px 18px}
+  .task-h .t-name{font-size:14px;font-weight:600}
+  .task-h .t-desc{font-size:11.5px;color:var(--dim);margin-top:2px}
+  .task-h .grow{margin-left:auto;display:flex;align-items:center;gap:10px}
+  .task-b{padding:0 18px 16px;border-top:1px solid var(--line);padding-top:14px;display:none}
+  .task.open .task-b{display:block}
+  .tag{font-size:11px;padding:2px 8px;border-radius:999px;background:var(--panel2);color:var(--dim);border:1px solid var(--line)}
+  .tag.on{background:rgba(61,220,151,.12);color:var(--ok);border-color:rgba(61,220,151,.3)}
+  /* 列表 */
+  .item{
+    display:flex;gap:12px;padding:12px 0;border-bottom:1px solid var(--line);
+  }
+  .item:last-child{border-bottom:none}
+  .item .body{flex:1;min-width:0}
+  .item .txt{font-size:13.5px;line-height:1.55;word-break:break-word;white-space:pre-wrap}
+  .item .meta{font-size:11.5px;color:var(--dim2);margin-top:5px;display:flex;gap:10px;flex-wrap:wrap}
+  .item .ctx{
+    font-size:12px;color:var(--dim);background:var(--bg2);border-left:2px solid var(--line2);
+    padding:6px 10px;border-radius:0 7px 7px 0;margin-top:7px;
+    white-space:pre-wrap;word-break:break-word;
+  }
+  .item .acts{display:flex;gap:6px;align-items:flex-start;flex:none}
+  .tabs{display:flex;gap:6px;margin-bottom:14px}
+  .tab{
+    padding:7px 14px;border-radius:8px;font-size:13px;color:var(--dim);cursor:pointer;
+    border:1px solid transparent;transition:.14s;
+  }
+  .tab:hover{background:var(--panel);color:var(--text)}
+  .tab.active{background:rgba(34,211,238,.1);color:var(--accent2);border-color:rgba(34,211,238,.3)}
+  .empty{text-align:center;color:var(--dim2);font-size:13px;padding:36px 0}
+  /* prompt */
+  .p-grid{display:grid;gap:12px}
+  .p-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .p-head h3{font-size:13.5px;font-weight:600}
+  .p-key{font-family:var(--mono);font-size:11px;color:var(--accent2);opacity:.8}
+  .p-body{display:grid;gap:10px}
+  .p-actions{display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap}
+  .p-actions .grow{margin-left:auto}
+  /* 日志 */
+  pre.logs{
+    background:#070910;border:1px solid var(--line);border-radius:11px;
+    padding:14px 16px;font-family:var(--mono);font-size:12px;line-height:1.65;
+    color:#a8b2c6;max-height:calc(100vh - 230px);overflow:auto;white-space:pre-wrap;
+    word-break:break-all;
+  }
+  /* 知识库 */
+  .kpi{padding:14px 16px}
+  .kpi-n{font-size:22px;font-weight:650;letter-spacing:-.4px;color:#e8ecf6}
+  .kpi-l{font-size:11.5px;color:var(--muted);margin-top:4px}
+  pre.kbview, textarea.kbjson{
+    background:#070910;border:1px solid var(--line);border-radius:11px;
+    padding:14px 16px;font-size:12.5px;line-height:1.75;color:#b8c2d6;
+    max-height:calc(100vh - 380px);overflow:auto;white-space:pre-wrap;
+    word-break:break-word;width:100%;box-sizing:border-box;
+  }
+  textarea.kbjson{font-family:var(--mono);font-size:12px;resize:vertical;min-height:420px;color:#9fb0c8}
+  /* toast */
+  #toast{
+    position:fixed;bottom:24px;left:50%;transform:translate(-50%,20px);
+    background:var(--panel2);border:1px solid var(--line2);border-radius:11px;
+    padding:11px 20px;font-size:13px;opacity:0;pointer-events:none;
+    transition:.25s;z-index:99;max-width:80vw;box-shadow:0 12px 40px -12px #000;
+  }
+  #toast.show{opacity:1;transform:translate(-50%,0)}
+  #toast.ok{border-color:rgba(61,220,151,.45)}
+  #toast.err{border-color:rgba(248,113,113,.5);color:#fca5a5}
+  /* 账号矩阵 */
+  .acct-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-bottom:14px}
+  .acct{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:14px 16px;transition:.14s}
+  .acct.on{border-color:rgba(61,220,151,.28);background:linear-gradient(180deg,rgba(61,220,151,.04),transparent)}
+  .acct.off{opacity:.62}
+  .acct .ah{display:flex;align-items:flex-start;gap:10px}
+  .acct .an{font-size:14px;font-weight:650;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .acct .am{font-size:11.5px;color:var(--dim2);margin-top:3px;font-family:var(--mono)}
+  .acct .ah .switch{margin-left:auto;margin-top:2px}
+  .acct .arow{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--dim);margin-top:8px;font-variant-numeric:tabular-nums}
+  .acct .arow b{color:var(--text);font-weight:600}
+  .acct .arow.dim{color:var(--dim2);font-size:11.5px}
+  .acct .aacts{display:flex;gap:6px;margin-top:11px;flex-wrap:wrap}
+  .persona{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid rgba(139,92,246,.35);background:rgba(139,92,246,.12);color:#c4b5fd}
+  .acct-pick{display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin-bottom:12px;flex-wrap:wrap}
+  .acct-pick label{font-size:12px;color:var(--dim)}
+  .acct-pick select{width:auto;min-width:180px;padding:5px 8px}
+  .acct-pick .grow{margin-left:auto;font-size:11.5px;color:var(--dim2)}
+  /* 滚动条 */
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:#2a3140;border-radius:5px;border:2px solid var(--bg2)}
+  ::-webkit-scrollbar-thumb:hover{background:#3a4457}
+  ::-webkit-scrollbar-track{background:transparent}
+  @media (max-width:760px){
+    body{grid-template-columns:1fr;grid-template-areas:"top" "main"}
+    .sidebar{display:none}
+    main{padding:16px 14px 50px}
+  }
+</style>
+<script src="qrcode.min.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">鼠</div>
+    <div>
+      <h1>鼠洞SD 控制台</h1>
+      <div class="sub" id="acct">连接中…</div>
+    </div>
+  </div>
+  <div class="top-right">
+    <div class="pill" id="tokenPill"><span class="dot"></span>token —</div>
+    <div class="pill" id="daemonPill"><span class="dot"></span>daemon —</div>
+    <div class="dry-wrap" id="dryWrap" title="切换 干跑/真实执行">
+      <span class="dry-label" id="dryLabel">DRY</span>
+      <label class="switch">
+        <input type="checkbox" id="dryToggle">
+        <span class="track"><span class="thumb"></span></span>
+      </label>
+    </div>
+  </div>
+</header>
+
+<nav class="sidebar">
+  <div class="nav-item active" data-tab="overview"><span class="ic">◈</span>总览</div>
+  <div class="nav-item" data-tab="accounts"><span class="ic">◎</span>账号矩阵</div>
+  <div class="nav-item" data-tab="review"><span class="ic">✓</span>待审 <b id="navRv" style="display:none;margin-left:auto;background:rgba(245,185,92,.18);color:#f5b95c;border-radius:8px;padding:1px 6px;font-size:11px">0</b></div>
+  <div class="nav-item" data-tab="tasks"><span class="ic">⚙</span>任务与 Prompt</div>
+  <div class="nav-item" data-tab="content"><span class="ic">☰</span>我的内容</div>
+  <div class="nav-item" data-tab="debug"><span class="ic">⚡</span>调试台</div>
+  <div class="nav-item" data-tab="kb"><span class="ic">✦</span>知识库</div>
+  <div class="nav-item" data-tab="sync"><span class="ic">⇄</span>手机同步</div>
+  <div class="nav-item" data-tab="logs"><span class="ic">▤</span>日志</div>
+  <div class="nav-foot">
+    <div>匿名已禁用</div>
+    <div id="footVer">dry_run = —</div>
+  </div>
+</nav>
+
+<main>
+  <!-- ========== 总览 ========== -->
+  <section class="page active" id="page-overview">
+    <div class="page-head">
+      <h2>总览</h2>
+      <span class="hint">配额按真实动作计数，干跑不占额度</span>
+      <div class="grow">
+        <button class="btn sm" onclick="refresh(true)">刷新</button>
+        <button class="btn sm" onclick="refreshToken()">续期 token</button>
+      </div>
+    </div>
+
+    <div class="stats" id="stats"></div>
+
+    <div class="card note" id="dryNote" style="display:none">
+      <div class="card-h"><h3>当前是干跑模式</h3></div>
+      <div style="font-size:13px;color:var(--dim);line-height:1.7">
+        所有任务只生成并写日志，不会真的发到论坛。上方的 <b>DRY</b> 开关拨到右侧即切真实执行。
+        建议先在「任务与 Prompt」里逐条点「跑一次」，看清草稿再放开。
+      </div>
+    </div>
+
+    <div class="row" style="align-items:flex-start">
+      <div class="card" style="flex:1.1">
+        <div class="card-h">
+          <h3>当前查看账号</h3>
+          <div class="grow">
+            <select id="acctSel" style="min-width:210px;padding:6px 8px"></select>
+            <button class="btn sm" onclick="switchAccount(this)">切换</button>
+          </div>
+        </div>
+        <div id="acctBox" style="font-size:13px;line-height:2"></div>
+        <div class="hint" style="margin-top:8px">这里只影响控制台看哪个号；daemon 会并行跑所有启用的号。</div>
+      </div>
+      <div class="card" style="flex:1">
+        <div class="card-h"><h3>守护进程</h3></div>
+        <div id="daemonBox" style="font-size:13px;line-height:2;color:var(--dim)"></div>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="btn sm primary" onclick="daemon('start')">启动 daemon</button>
+          <button class="btn sm danger" onclick="daemon('stop')">停止</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <h3>LLM 配置</h3>
+        <span class="tag" id="llmState">—</span>
+        <div class="grow"><button class="btn sm primary" onclick="saveLLM()">保存</button></div>
+      </div>
+      <div class="row">
+        <div style="flex:1.4"><label class="f">接口地址</label><input type="text" id="llmBase" placeholder="https://api.deepseek.com/v1"></div>
+        <div><label class="f">模型</label><input type="text" id="llmModel" placeholder="deepseek-chat"></div>
+        <div style="flex:0 0 110px"><label class="f">温度</label><input type="number" id="llmTemp" step="0.1" min="0" max="2"></div>
+      </div>
+      <div style="margin-top:12px">
+        <label class="f">API Key（留空 = 不修改当前值）</label>
+        <input type="password" id="llmKey" placeholder="sk-…">
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <h3>向量与精排（SiliconFlow）</h3>
+        <span class="tag" id="vecState">—</span>
+        <div class="grow"><button class="btn sm primary" onclick="saveKeys(this)">保存</button></div>
+      </div>
+      <div class="hint" style="margin-bottom:10px;line-height:1.75">
+        两把 key 分工不同：<b>DeepSeek</b> 负责写内容，<b>SiliconFlow</b> 负责把帖子和记忆变成向量、
+        再给候选排一次序。不填也能跑，但检索只剩关键词匹配，评论会明显变钝。
+      </div>
+      <div class="row">
+        <div style="flex:1.2"><label class="f">接口地址</label>
+          <input type="text" id="kEmbBase" placeholder="https://api.siliconflow.cn/v1"></div>
+        <div style="flex:1"><label class="f">Embedding 模型</label>
+          <input type="text" id="kEmbModel" placeholder="BAAI/bge-m3"></div>
+      </div>
+      <div style="margin-top:10px">
+        <label class="f">Embedding API Key（留空 = 不修改）</label>
+        <input type="password" id="kEmbKey" placeholder="sk-…">
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div style="flex:1"><label class="f">Rerank 模型</label>
+          <input type="text" id="kRrModel" placeholder="BAAI/bge-reranker-v2-m3"></div>
+        <div style="flex:0 0 140px"><label class="f">精排开关</label>
+          <select id="kRrOn"><option value="1">开启</option><option value="0">关闭</option></select></div>
+      </div>
+      <div style="margin-top:10px">
+        <label class="f">Rerank API Key（留空 = 不修改）</label>
+        <input type="password" id="kRrKey" placeholder="sk-…">
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <h3>风控参数</h3>
+        <span class="tag">改完立即生效</span>
+        <div class="grow"><button class="btn sm primary" onclick="saveGuard()">保存</button></div>
+      </div>
+      <div class="row">
+        <div><label class="f">静默时段开始（点）</label><input type="number" id="qStart" min="0" max="23"></div>
+        <div><label class="f">静默时段结束（点）</label><input type="number" id="qEnd" min="0" max="23"></div>
+        <div><label class="f">抖动最小（秒）</label><input type="number" id="jMin" min="0"></div>
+        <div><label class="f">抖动最大（秒）</label><input type="number" id="jMax" min="0"></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div><label class="f">每日 发帖/评论/回复/赞</label><input type="text" id="dl" placeholder="3,8,15,30"></div>
+        <div><label class="f">每小时 发帖/评论/回复/赞</label><input type="text" id="hl" placeholder="1,2,5,8"></div>
+      </div>
+      <div style="margin-top:12px">
+        <label class="f">跳过关键词（逗号或换行分隔，命中的帖子不互动）</label>
+        <textarea id="kw" rows="2"></textarea>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 待审 ========== -->
+  <section class="page" id="page-review">
+    <div class="page-head">
+      <h2>待审</h2>
+      <span class="hint" id="reviewHint">评分不过线的帖子先压在这里，你点头才发出去</span>
+      <div class="grow">
+        <button class="btn sm" onclick="loadReview()">刷新</button>
+      </div>
+    </div>
+    <div class="tabs" id="reviewTabs">
+      <div class="tab active" data-rv="pending">待审 <b id="rvPending">0</b></div>
+      <div class="tab" data-rv="approved">已通过 <b id="rvApproved">0</b></div>
+      <div class="tab" data-rv="published">已发布</div>
+      <div class="tab" data-rv="rejected">已打回</div>
+    </div>
+    <div id="reviewList"><div class="hint" style="padding:20px 0">加载中…</div></div>
+  </section>
+
+  <!-- ========== 账号矩阵 ========== -->
+  <section class="page" id="page-accounts">
+    <div class="page-head">
+      <h2>账号矩阵</h2>
+      <span class="hint">每个号独立人设 / 配额 / token，daemon 给每个号开一个线程并行跑</span>
+      <div class="grow"><button class="btn sm" onclick="refresh(true)">刷新</button></div>
+    </div>
+
+    <div class="acct-grid" id="acctGrid"></div>
+
+    <div class="card">
+      <div class="card-h">
+        <h3>一键生成机器人号</h3>
+        <span class="tag" id="spawnTag">—</span>
+        <div class="grow"><button class="btn sm primary" id="spawnBtn" onclick="spawnBots(this)">生成</button></div>
+      </div>
+      <div class="row">
+        <div style="flex:0 0 150px">
+          <label class="f">数量</label>
+          <select id="spawnCount">
+            <option value="1">1 个</option>
+            <option value="2">2 个</option>
+            <option value="4">4 个</option>
+            <option value="8" selected>8 个</option>
+            <option value="16">16 个</option>
+            <option value="32">32 个</option>
+          </select>
+        </div>
+        <div style="flex:1">
+          <label class="f">它会做什么</label>
+          <div class="hint" style="padding-top:6px;line-height:1.75">
+            程序自己去服务端注册<b>全新账号</b>（用户名 + 随机密码，不经过微信），
+            再按花名册分配人设。优先挑<b>还没被用过</b>的校区 / 专业 / 性格，
+            所以前 32 个号彼此不重样；用完后再生成会循环复用。
+          </div>
+        </div>
+      </div>
+      <div id="spawnProg" style="display:none;margin-top:12px">
+        <div class="bar"><i id="spawnBar" style="width:0%"></i></div>
+        <div class="mono" id="spawnLog" style="margin-top:8px;max-height:190px;overflow:auto;font-size:12px;color:var(--dim);white-space:pre-wrap"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h3>注册新小号</h3><span class="tag">用户名密码，不经过微信</span></div>
+      <div class="row">
+        <div><label class="f">人设</label><select id="regPersona"></select></div>
+        <div style="flex:1.2"><label class="f">显示名（留空自动）</label><input type="text" id="regLabel" placeholder="夜猫子 · 温柔"></div>
+        <div><label class="f">用户名（留空自动生成）</label><input type="text" id="regUser" placeholder="字母数字"></div>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap">
+        <button class="btn sm primary" onclick="registerAcct(this)">注册并接入</button>
+        <span class="hint">注册后默认启用，发帖时间点会自动错开，避免三个号同时冒头</span>
+      </div>
+    </div>
+
+    <div class="card note">
+      <div class="card-h"><h3>三个号为什么不会说同样的话</h3></div>
+      <div style="font-size:13px;color:var(--dim);line-height:1.8">
+        每次发帖前，用<b>当前系统时间（纳秒）</b>派生的种子从人设语料里抽三件事：
+        <b>场景 × 板块 × 写法</b>。抽过的场景会记进 state.db，最近 10 条不重复。
+        评论对象同样用时间种子做加权抽样（新帖权重高，但冷门帖也有机会），
+        所以三个号不会挤在同一批帖子下面。
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 任务与 Prompt ========== -->
+  <section class="page" id="page-tasks">
+    <div class="page-head">
+      <h2>任务与 Prompt</h2>
+      <span class="hint">每个功能独立配置、独立调试</span>
+      <div class="grow"><button class="btn sm" onclick="refresh(true)">重新载入</button></div>
+    </div>
+    <div class="acct-pick">
+      <label>正在编辑账号</label>
+      <select id="taskAcct" onchange="switchView(this.value)"></select>
+      <span class="grow" id="taskAcctHint">—</span>
+    </div>
+    <div id="taskList"></div>
+    <div class="card-h" style="margin:22px 0 12px"><h3 style="font-size:14px">Prompt 模板</h3>
+      <span class="hint" style="margin-left:8px">占位符：{post} {their} {angle} {topic} {style} {time} {seed} —— 只影响上面选中的账号</span>
+    </div>
+    <div class="p-grid" id="promptList"></div>
+  </section>
+
+  <!-- ========== 我的内容 ========== -->
+  <section class="page" id="page-content">
+    <div class="page-head">
+      <h2>我的内容</h2>
+      <span class="hint">删除是不可逆的，删掉后去重记录也会一并清空</span>
+      <div class="grow"><button class="btn sm" onclick="loadContent()">刷新</button></div>
+    </div>
+    <div class="tabs">
+      <div class="tab active" data-kind="posts">我发的帖子</div>
+      <div class="tab" data-kind="comments">我发的评论</div>
+      <div class="tab" data-kind="replies">我的楼中楼</div>
+    </div>
+    <div class="card" id="contentList"><div class="empty">加载中…</div></div>
+  </section>
+
+  <!-- ========== 调试台 ========== -->
+  <section class="page" id="page-debug">
+    <div class="page-head">
+      <h2>调试台</h2>
+      <span class="hint">单条手动执行，不受配额与静默时段限制</span>
+    </div>
+
+    <div class="card note" id="dbgDryNote" style="display:none">
+      <div class="card-h"><h3>干跑中</h3></div>
+      <div style="font-size:13px;color:var(--dim)">下面的「预览」只调接口不落库；点「直接发出」会绕过 dry_run，真的写到论坛。</div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h3>发帖</h3></div>
+      <div class="row" style="margin-bottom:10px">
+        <div style="flex:1.4"><label class="f">板块</label><select id="dbgTopic"></select></div>
+      </div>
+      <label class="f">正文</label>
+      <textarea id="dbgPostText" rows="3" placeholder="想发什么…"></textarea>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="btn sm" onclick="dbgGen('post',this)">AI 写一条</button>
+        <button class="btn sm" onclick="dbgPost(false,this)">预览</button>
+        <button class="btn sm danger" onclick="dbgPost(true,this)">直接发出</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h3>评论 / 点赞指定帖子</h3></div>
+      <div class="row">
+        <div style="flex:1.6"><label class="f">帖子 ID 或小程序链接</label><input type="text" id="dbgPostId" placeholder="UG9zdDoxNTI3ODEw"></div>
+        <div style="flex:0 0 120px"><label class="f">快捷</label><button class="btn sm" style="width:100%" onclick="fillLatest()">取最新帖</button></div>
+      </div>
+      <label class="f" style="margin-top:12px">评论内容</label>
+      <textarea id="dbgCmtText" rows="2" placeholder="想说什么…"></textarea>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="btn sm" onclick="dbgGen('comment',this)">AI 写一条</button>
+        <button class="btn sm" onclick="dbgComment(false,this)">预览</button>
+        <button class="btn sm danger" onclick="dbgComment(true,this)">直接发出</button>
+        <span style="width:1px;background:var(--line);margin:0 4px"></span>
+        <button class="btn sm" onclick="dbgLike('like',true,this)">预览点赞</button>
+        <button class="btn sm" onclick="dbgLike('like',false,this)">点赞</button>
+        <button class="btn sm" onclick="dbgLike('unlike',false,this)">取消赞</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h3>LLM 连通测试</h3>
+        <div class="grow"><span class="tag" id="llmTag">—</span></div>
+      </div>
+      <div class="row" style="margin-bottom:10px">
+        <div><label class="f">用哪个 prompt</label><select id="llmPromptKey"></select></div>
+        <div><label class="f">喂给它的样例帖子</label><input type="text" id="llmSample" placeholder="今天食堂的饭好咸"></div>
+      </div>
+      <button class="btn sm primary" onclick="llmTest()">生成一次</button>
+      <div id="llmOut" class="mono" style="margin-top:12px;color:var(--dim);white-space:pre-wrap"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h3>最近的动作记录</h3><div class="grow"><button class="btn sm" onclick="loadHistory()">刷新</button></div></div>
+      <div id="historyList" style="font-size:12.5px;color:var(--dim)">—</div>
+    </div>
+  </section>
+
+  <!-- ========== 日志 ========== -->
+  <section class="page" id="page-sync">
+    <div class="page-head">
+      <h2>手机同步</h2>
+      <span class="hint">把电脑上的整份花名册一次性送到手机 App，扫完就能直接登录</span>
+      <div class="grow"><button class="btn sm" onclick="loadPack(true)">重新生成</button></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h3>扫码导入</h3><span class="tag" id="qrTag">—</span></div>
+      <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start">
+        <div id="qrBox" style="background:#fff;padding:14px;border-radius:14px;min-width:300px;min-height:300px;display:flex;align-items:center;justify-content:center;color:#666;font-size:13px">
+          点「重新生成」出码
+        </div>
+        <div style="flex:1;min-width:250px;font-size:13px;color:var(--dim);line-height:2">
+          <b style="color:var(--text)">手机上这样收</b><br>
+          1. 打开「鼠洞透视」→ 我的 → 花名册 → <b>扫码导入</b><br>
+          2. 拍一张这个二维码（也可以从相册选图）<br>
+          3. 解析成功，整份花名册（含账号密码）就写进手机了<br><br>
+          <span style="color:var(--warn)">二维码里是明文密码，别截图发群。</span><br>
+          同一条 Wi-Fi 下也可以直接传 <code>roster.json</code>。
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h3>文件 / 文本</h3><span class="tag" id="packTag">—</span></div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <button class="btn sm" onclick="copyRoster(this)">复制 JSON</button>
+        <button class="btn sm" onclick="downloadRoster()">下载 roster.json</button>
+        <span class="hint">传到手机后用 App 的「从文件导入」选它</span>
+      </div>
+      <div class="mono" id="rosterPreview" style="margin-top:12px;font-size:12px;color:var(--dim);max-height:200px;overflow:auto;white-space:pre-wrap"></div>
+    </div>
+  </section>
+
+  <section class="page" id="page-logs">
+    <div class="page-head">
+      <h2>日志</h2>
+      <span class="hint" id="logHint">每 3 秒自动刷新</span>
+      <div class="grow">
+        <button class="btn sm" onclick="loadLogs()">刷新</button>
+      </div>
+    </div>
+    <pre class="logs" id="logBox">加载中…</pre>
+  </section>
+
+  <section class="page" id="page-kb">
+    <div class="page-head">
+      <h2>知识库</h2>
+      <span class="hint" id="kbHint">从社区语料提炼，生成时自动注入</span>
+      <div class="grow">
+        <button class="btn sm" onclick="loadKB(true)">刷新</button>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px">
+      <div class="card kpi"><div class="kpi-n" id="kbPosts">—</div><div class="kpi-l">帖子</div></div>
+      <div class="card kpi"><div class="kpi-n" id="kbCmts">—</div><div class="kpi-l">评论</div></div>
+      <div class="card kpi"><div class="kpi-n" id="kbSpan">—</div><div class="kpi-l">时间跨度</div></div>
+      <div class="card kpi"><div class="kpi-n" id="kbDocs">—</div><div class="kpi-l">检索文档</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <h3>注入开关</h3>
+        <div class="grow"></div>
+        <span class="hint">关掉后生成时不再参考知识库 / 历史示范</span>
+      </div>
+      <div style="display:flex;gap:26px;flex-wrap:wrap;font-size:13px">
+        <label style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="kbSwitch" onchange="toggleKbFlag('kb', this.checked)">
+          知识库常识（板块/梗/语气/情绪）
+        </label>
+        <label style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="ragSwitch" onchange="toggleKbFlag('rag', this.checked)">
+          历史示范检索（同类帖+真实高赞评论）
+        </label>
+        <div class="grow"></div>
+        <button class="btn sm" onclick="rebuildKB('index')">只重建索引</button>
+        <button class="btn sm" onclick="rebuildKB('all')">全量重建</button>
+      </div>
+      <div class="hint" id="kbBuildHint" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <div class="card-h">
+        <h3>语义层</h3>
+        <div class="grow"></div>
+        <span class="hint">稀疏倒排在本地，向量/精排走硅基流动</span>
+        <button class="btn sm" onclick="probeRag()">测一下</button>
+      </div>
+      <div style="display:flex;gap:26px;flex-wrap:wrap;font-size:13px;align-items:center">
+        <span>倒排索引 <b id="ragSparse">—</b></span>
+        <span>全量向量 <b id="ragDense">—</b></span>
+        <span>语义向量 <b id="ragEmbed">—</b></span>
+        <span>交叉精排 <b id="ragRerank">—</b></span>
+      </div>
+      <div class="hint" id="ragProbe" style="margin-top:10px">点「测一下」会真发一次请求，看通不通、多少毫秒</div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <div class="card-h">
+        <h3>拟人标尺</h3>
+        <div class="grow"></div>
+        <span class="hint">每次生成前按真实分布抽长度，生成后按真实比例补表情</span>
+      </div>
+      <div style="display:flex;gap:26px;flex-wrap:wrap;font-size:13px;align-items:center">
+        <span>评论中位 <b id="hsP50">—</b></span>
+        <span>评论带表情 <b id="hsSticker">—</b></span>
+        <span>句号结尾 <b id="hsDot">—</b></span>
+        <span>帖子中位 <b id="hsPost">—</b></span>
+      </div>
+      <div class="hint" id="hsBands" style="margin-top:10px">长度分段：—</div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <div class="card-h">
+        <h3>内容</h3>
+        <div class="tabs grow" style="margin:0 10px">
+          <div class="tab active" data-kbtab="md" onclick="kbTab('md', this)">正文</div>
+          <div class="tab" data-kbtab="json" onclick="kbTab('json', this)">JSON</div>
+          <div class="tab" data-kbtab="log" onclick="kbTab('log', this)">构建日志</div>
+        </div>
+        <button class="btn sm" id="kbSaveBtn" onclick="saveKB()" style="display:none">保存 JSON</button>
+      </div>
+      <pre class="kbview" id="kbMd">加载中…</pre>
+      <textarea class="kbjson" id="kbJson" spellcheck="false" style="display:none"></textarea>
+      <pre class="kbview" id="kbLog" style="display:none"></pre>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let S = null, curTab = 'overview', contentKind = 'posts', logTimer = null;
+
+function toast(msg, kind='ok'){
+  const t = $('#toast');
+  t.textContent = msg; t.className = 'show ' + kind;
+  clearTimeout(t._h); t._h = setTimeout(()=>{ t.className=''; }, kind==='err'?5200:2600);
+}
+async function api(path, opt){
+  const r = await fetch(path, opt);
+  let j;
+  try { j = await r.json(); } catch(e){ throw new Error('服务端返回异常 (HTTP '+r.status+')'); }
+  if (!j.ok) throw new Error(j.error || '未知错误');
+  return j.data;
+}
+const post = (path, body) => api(path, {
+  method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{})
+});
+function busy(btn, on){ if(!btn) return; btn.disabled = on; btn.style.opacity = on?'.55':''; }
+
+/* ---------- 顶栏 ---------- */
+function renderTop(){
+  const a = S.account || {};
+  const cur = (S.accounts||[]).find(x=>x.name===S.active_account) || {};
+  const nick = [a.nickname, a.grade, a.school, a.campus].filter(Boolean).join(' · ');
+  $('#acct').textContent = a.error ? ('账号异常：' + a.error)
+    : ((cur.label || S.active_account) + (nick ? ' · ' + nick : (cur.username ? ' · @' + cur.username : '')));
+  const tk = S.token || {};
+  const tp = $('#tokenPill');
+  if (tk.error){ tp.innerHTML = '<span class="dot bad"></span>token 异常'; }
+  else {
+    const low = tk.access_left < 7200;
+    tp.innerHTML = `<span class="dot ${low?'bad':'on'}"></span>token <b>${esc(tk.access_text)}</b> / refresh ${esc(tk.refresh_text)}`;
+  }
+  const dm = S.daemon || {};
+  $('#daemonPill').innerHTML = `<span class="dot ${dm.running?'on':'off'}"></span>daemon ${dm.running?('PID '+dm.pid):'未运行'}`;
+  const dry = S.dry_run;
+  $('#dryToggle').checked = !dry;
+  $('#dryWrap').classList.toggle('live', !dry);
+  $('#dryLabel').textContent = dry ? 'DRY' : 'LIVE';
+  $('#footVer').textContent = 'dry_run = ' + dry;
+  $('#dryNote').style.display = dry ? '' : 'none';
+  $('#dbgDryNote').style.display = dry ? '' : 'none';
+  const llm = S.llm || {};
+  const lt = $('#llmTag');
+  lt.textContent = llm.has_key ? (llm.model || '已配置') : '未配置 key';
+  lt.className = 'tag' + (llm.has_key ? ' on' : '');
+}
+
+/* ---------- 账号 ---------- */
+function fillAcctSelects(){
+  if (!S) return;
+  const opts = (S.accounts||[]).map(a =>
+    `<option value="${esc(a.name)}"${a.name===S.active_account?' selected':''}>${esc(a.label)}${a.enabled?'':'（停用）'}</option>`
+  ).join('');
+  ['#acctSel','#taskAcct'].forEach(sel=>{ const el=$(sel); if (el) el.innerHTML = opts; });
+  const rp = $('#regPersona');
+  if (rp && !rp.dataset.done){
+    rp.innerHTML = Object.entries(S.personas||{}).map(([k,v]) =>
+      `<option value="${esc(k)}">${esc(v.label)} — ${esc(v.desc)}</option>`).join('');
+    rp.dataset.done = '1';
+  }
+  const cur = (S.accounts||[]).find(x=>x.name===S.active_account) || {};
+  const td = cur.today || {};
+  const hint = $('#taskAcctHint');
+  if (hint) hint.textContent = `@${cur.username||'-'} · ${cur.user_id||''} · 今日 ${td.post||0} 发 / ${td.comment||0} 评 / ${td.like||0} 赞`;
+}
+function renderAccounts(){
+  if (!S) return;
+  const box = $('#acctGrid');
+  if (!box) return;
+  box.innerHTML = (S.accounts||[]).map(a=>{
+    const tk = a.token||{}, td = a.today||{}, w = a.worker||{};
+    const online = w.status === 'running' && (w.ago ?? 999) < 40;
+    return `<div class="acct ${a.enabled?'on':'off'}">
+      <div class="ah">
+        <div>
+          <div class="an">${esc(a.label)}
+            ${a.name===S.active_account?'<span class="tag on">查看中</span>':''}
+            ${a.enabled?'':'<span class="tag">停用</span>'}
+          </div>
+          <div class="am">@${esc(a.username||'-')} · ${esc(a.user_id||'-')}</div>
+        </div>
+        <label class="switch ok"><input type="checkbox" ${a.enabled?'checked':''}
+          onchange="toggleAcct('${esc(a.name)}', this)"><span class="track"><span class="thumb"></span></span></label>
+      </div>
+      <div class="arow">
+        <span>token <b>${esc(tk.access_text||'—')}</b></span>
+        <span>refresh ${esc(tk.refresh_text||'—')}</span>
+        ${tk.error?`<span style="color:var(--bad)">${esc(tk.error)}</span>`:''}
+      </div>
+      <div class="arow">
+        <span>今日 <b>${td.post||0}</b> 发</span><span><b>${td.comment||0}</b> 评</span>
+        <span><b>${td.reply||0}</b> 回</span><span><b>${td.like||0}</b> 赞</span>
+      </div>
+      <div class="arow dim">
+        <span class="dot ${online?'on':(w.status==='error'?'bad':'off')}" style="align-self:center"></span>
+        <span>${esc(w.status || (a.enabled ? '未运行' : '不参与 daemon'))}${w.ago!=null?` · ${w.ago}s 前`:''}</span>
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%">${esc(w.note||'')}</span>
+      </div>
+      <div class="aacts">
+        <button class="btn sm" onclick="switchView('${esc(a.name)}')">查看内容</button>
+        <button class="btn sm" onclick="editPromptOf('${esc(a.name)}')">改 Prompt</button>
+        <button class="btn sm" onclick="refreshOneToken('${esc(a.name)}', this)">续期</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+async function switchView(name){
+  if (!name || !S) return;
+  if (name === S.active_account){ renderAccounts(); return; }
+  try{
+    S = await post('/api/account', {name, view:true});
+    renderTop(); renderStats(); fillAcctSelects(); renderAccounts(); renderOverview();
+    renderTasks(); renderPrompts(); bindTaskEvents(); bindPromptEvents();
+    if (curTab === 'content') loadContent();
+    const a = (S.accounts||[]).find(x=>x.name===name)||{};
+    toast('已切到「' + (a.label||name) + '」');
+  } catch(e){ toast(e.message, 'err'); }
+}
+async function toggleAcct(name, el){
+  try{
+    S = await post('/api/account', {name, enabled: el.checked});
+    renderTop(); fillAcctSelects(); renderAccounts(); renderOverview();
+    toast((el.checked?'已启用 ':'已停用 ') + name + (el.checked?'，daemon 10 秒内会拉起':''));
+  } catch(e){ toast(e.message,'err'); el.checked = !el.checked; }
+}
+async function registerAcct(btn){
+  const body = {
+    persona: $('#regPersona').value,
+    label: $('#regLabel').value.trim(),
+    username: $('#regUser').value.trim()
+  };
+  busy(btn, true);
+  try{
+    const d = await post('/api/register', body);
+    toast(`已注册「${d.label}」@${d.username}`);
+    $('#regLabel').value = ''; $('#regUser').value = '';
+    await refresh(true);
+  } catch(e){ toast(e.message, 'err'); }
+  busy(btn, false);
+}
+async function refreshOneToken(name, btn){
+  busy(btn, true);
+  try{
+    const d = await post('/api/token/refresh', {account:name});
+    const r = d[name] || {};
+    toast(r.error ? ('续期失败：' + r.error) : `已续期：access ${r.access_text} / refresh ${r.refresh_text}`);
+    await refresh(false);
+  } catch(e){ toast(e.message, 'err'); }
+  busy(btn, false);
+}
+function editPromptOf(name){
+  switchView(name).then(()=>{ switchTab('tasks'); setTimeout(()=>{
+    const el = document.querySelector('#promptList');
+    if (el) el.scrollIntoView({behavior:'smooth', block:'start'});
+  }, 120); });
+}
+
+/* ---------- 总览 ---------- */
+function renderStats(){
+  const q = S.quota || {}, t = q.today || {}, h = q.hour || {}, dl = q.daily_limits || {};
+  const meta = [['post','今日发帖'],['comment','今日评论'],['reply','今日回复'],['like','今日点赞']];
+  $('#stats').innerHTML = meta.map(([k,label])=>{
+    const used = t[k]||0, lim = dl[k]||0;
+    const pct = lim ? Math.min(100, used/lim*100) : 0;
+    const color = pct>=100 ? 'var(--bad)' : pct>=70 ? 'var(--warn)' : 'linear-gradient(90deg,var(--accent),var(--accent2))';
+    return `<div class="stat">
+      <div class="k">${label}</div>
+      <div class="v">${used}<small> / ${lim}</small></div>
+      <div class="bar"><i style="width:${pct}%;background:${color.startsWith('var')?color:'linear-gradient(90deg,var(--accent),var(--accent2))'}"></i></div>
+      <div class="k" style="margin-top:7px">近 1 小时 ${h[k]||0} 次</div>
+    </div>`;
+  }).join('');
+}
+function renderOverview(){
+  if (!S) return;
+  const a = S.account || {}, tk = S.token || {}, g = S.guard || {};
+  $("#acctBox").innerHTML = [
+    ['昵称', a.nickname], ['年级', a.grade], ['学院', a.institute],
+    ['学校', a.school], ['角色', a.role], ['user_id', a.userId]
+  ].map(([k,v]) => `<div style="display:flex;justify-content:space-between;gap:12px">
+      <span style="color:var(--dim)">${k}</span><b style="max-width:60%;text-align:right;word-break:break-all">${esc(v||'—')}</b></div>`).join('')
+    + `<div style="display:flex;justify-content:space-between;gap:12px;margin-top:8px;padding-top:8px;border-top:1px solid var(--line)">
+        <span style="color:var(--dim)">refresh 有效期</span><b style="color:var(--ok)">${esc(tk.refresh_text||'—')}</b></div>`;
+
+  fillAcctSelects();
+
+  const dm = S.daemon || {};
+  $("#daemonBox").innerHTML = dm.running
+    ? `<div>状态：<b style="color:var(--ok)">运行中</b>（PID ${dm.pid}）</div>
+       <div>会按配置的间隔自动跑已启用的任务</div>
+       <div>token 剩余不足 6 小时自动续</div>`
+    : `<div>状态：<b style="color:var(--dim)">未运行</b></div>
+       <div>不开也能用本页面手动执行</div>
+       <div>要长期挂着就点下面启动</div>`;
+
+  const qh = g.quiet_hours || [0,7], jt = g.jitter_seconds || [20,90];
+  $("#qStart").value = qh[0]; $("#qEnd").value = qh[1];
+  $("#jMin").value = jt[0]; $("#jMax").value = jt[1];
+  const dl = g.daily_limits||{}, hl = g.hourly_limits||{};
+  $("#dl").value = [dl.post,dl.comment,dl.reply,dl.like].join(',');
+  $("#hl").value = [hl.post,hl.comment,hl.reply,hl.like].join(',');
+  $("#kw").value = (g.skip_keywords||[]).join('、');
+
+  const llm = S.llm || {};
+  $("#llmBase").value = llm.base_url || '';
+  $("#llmModel").value = llm.model || '';
+  $("#llmTemp").value = llm.temperature ?? 0.9;
+  const ls = $("#llmState");
+  ls.textContent = llm.has_key ? '已配置' : '未配置 key';
+  ls.className = 'tag' + (llm.has_key ? ' on' : '');
+}
+
+/* ---------- 任务 ---------- */
+const TASK_META = {
+  scheduled_post: {name:'定时发帖', desc:'按 HH:MM 时间点发；板块和场景由时间种子随机', fields:['times','topic']},
+  reply_comments: {name:'主动回复评论', desc:'回别人给我帖子的评论 / 楼中楼', fields:['interval','max_per_run']},
+  autolike:       {name:'自动点赞', desc:'给时间线的新帖点赞，可开 AI 筛选', fields:['interval','max_per_run','llm_filter']},
+  random_comment: {name:'随机评论别人', desc:'主动去别人帖子下留一句，风险最高', fields:['interval','max_per_run','skip_if_comments_over']},
+};
+function renderTasks(){
+  if (!S) return;
+  const tasks = S.tasks || {};
+  $('#taskList').innerHTML = Object.entries(TASK_META).map(([key, m])=>{
+    const c = tasks[key] || {};
+    const on = !!c.enabled;
+    let extra = '';
+    if (key === 'scheduled_post'){
+      const tz = (c.times||[]).join(', ');
+      extra = `
+        <div class="row" style="margin-top:10px">
+          <div><label class="f">时间点（逗号分隔，24 小时制）</label>
+            <input type="text" data-k="times" value="${esc(tz)}" placeholder="09:30, 21:00"></div>
+          <div><label class="f">板块</label>
+            <div class="hint" style="padding:9px 0;line-height:1.5">由时间种子随机选（场景决定子版，不会发到集市）</div></div>
+        </div>
+        <div style="margin-top:10px"><label class="f">内容池（一行一条，留空则用 AI 生成）</label>
+          <textarea data-k="content_pool" rows="3" placeholder="今天食堂的糖醋排骨居然不甜了">${esc((c.content_pool||[]).join('\n'))}</textarea></div>
+        <div style="margin-top:10px"><label class="f">AI 写作提示词（当内容池为空时用这个当选题）</label>
+          <input type="text" data-k="seed" value="${esc(c.seed||'')}"></div>`;
+    } else {
+      const fields = [];
+      if (m.fields.includes('interval'))
+        fields.push(`<div><label class="f">间隔（秒）</label><input type="number" data-k="interval" value="${c.interval||600}" min="60"></div>`);
+      if (m.fields.includes('max_per_run'))
+        fields.push(`<div><label class="f">每次最多</label><input type="number" data-k="max_per_run" value="${c.max_per_run||1}" min="1" max="10"></div>`);
+      if (m.fields.includes('skip_if_comments_over'))
+        fields.push(`<div><label class="f">热帖跳过阈值（评论数 >）</label><input type="number" data-k="skip_if_comments_over" value="${c.skip_if_comments_over||20}" min="0"></div>`);
+      if (m.fields.includes('llm_filter'))
+        fields.push(`<div style="flex:0 0 150px"><label class="f">AI 筛选</label>
+          <select data-k="llm_filter"><option value="false"${!c.llm_filter?' selected':''}>关闭</option>
+          <option value="true"${c.llm_filter?' selected':''}>开启（耗 token）</option></select></div>`);
+      extra = `<div class="row" style="margin-top:10px">${fields.join('')}</div>`;
+    }
+    return `<div class="task ${on?'on':''} ${on?'open':''}" data-task="${key}">
+      <div class="task-h">
+        <div>
+          <div class="t-name">${m.name} <span class="tag ${on?'on':''}">${on?'已启用':'停用'}</span></div>
+          <div class="t-desc">${m.desc}</div>
+        </div>
+        <div class="grow">
+          <button class="btn sm" data-act="run">跑一次</button>
+          <button class="btn sm" data-act="toggle">${on?'展开/收起':'设置'}</button>
+          <label class="switch ok"><input type="checkbox" data-act="enable" ${on?'checked':''}>
+            <span class="track"><span class="thumb"></span></span></label>
+        </div>
+      </div>
+      <div class="task-b">${extra}
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="btn sm primary" data-act="save">保存此任务</button>
+          <span style="font-size:11.5px;color:var(--dim2);align-self:center">保存后 daemon 下一轮就读到新值</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+function topicOptions(selT, selS){
+  let out = '';
+  for (const [tname, t] of Object.entries(S.topics||{})){
+    for (const [sname, sid] of Object.entries(t.subtopics||{})){
+      const v = t.id + '|' + sid;
+      const sel = (t.id===selT && sid===selS) ? ' selected' : '';
+      out += `<option value="${esc(v)}"${sel}>${esc(tname)} / ${esc(sname)}</option>`;
+    }
+  }
+  return out;
+}
+
+/* ---------- Prompt ---------- */
+function renderPrompts(){
+  if (!S) return;
+  const ps = S.prompts || {};
+  const order = ['post','reply','comment','like'];
+  const keys = [...order.filter(k=>ps[k]), ...Object.keys(ps).filter(k=>!order.includes(k))];
+  $('#promptList').innerHTML = keys.map(k=>{
+    const p = ps[k] || {};
+    const on = p.enabled !== false;
+    return `<div class="card" data-prompt="${esc(k)}">
+      <div class="p-head">
+        <h3>${esc(p.label || k)}</h3><span class="p-key">${esc(k)}</span>
+        <div class="grow" style="margin-left:auto;display:flex;align-items:center;gap:10px">
+          <span class="tag ${on?'on':''}" data-role="ptag">${on?'启用':'停用'}</span>
+          <label class="switch ok"><input type="checkbox" data-pf="enabled" ${on?'checked':''}>
+            <span class="track"><span class="thumb"></span></span></label>
+        </div>
+      </div>
+      <div class="p-body">
+        <div><label class="f">system —— 角色与规则</label>
+          <textarea data-pf="system" rows="4">${esc(p.system||'')}</textarea></div>
+        <div><label class="f">user —— 每次喂进去的内容（支持占位符）</label>
+          <textarea data-pf="user" rows="2">${esc(p.user||'')}</textarea></div>
+      </div>
+      <div class="p-actions">
+        <button class="btn sm primary" data-pact="save">保存</button>
+        <button class="btn sm" data-pact="try">试生成</button>
+        <span class="grow"></span>
+        <span style="font-size:11.5px;color:var(--dim2)" data-role="pres"></span>
+      </div>
+    </div>`;
+  }).join('');
+  const sel = $('#llmPromptKey');
+  if (sel) sel.innerHTML = keys.map(k=>`<option value="${esc(k)}">${esc((ps[k]||{}).label||k)}</option>`).join('');
+}
+
+/* ---------- 内容 ---------- */
+function fmtTime(s){ return (s||'').replace('T',' ').slice(0,16); }
+async function loadContent(){
+  const box = $('#contentList');
+  box.innerHTML = '<div class="empty">加载中…</div>';
+  try{
+    const d = await api('/api/content?kind=' + contentKind + '&account=' + encodeURIComponent(S.active_account));
+    const edges = (d && d.edges) || [];
+    if (!edges.length){ box.innerHTML = '<div class="empty">这里还是空的</div>'; return; }
+    box.innerHTML = edges.map(e=>{
+      const n = e.node;
+      if (contentKind === 'posts'){
+        return `<div class="item"><div class="body">
+          <div class="txt">${esc(n.content)}</div>
+          <div class="meta"><span>${fmtTime(n.createdAt)}</span><span>赞 ${n.likeCount}</span>
+            <span>评 ${n.commentCount}</span><span>${esc((n.topic||{}).name||'')} · ${esc((n.subtopic||{}).name||'')}</span>
+            <span style="color:var(--dim2);font-family:var(--mono)">${esc(n.id)}</span></div>
+        </div><div class="acts">
+          <button class="btn sm danger" data-del="post" data-id="${esc(n.id)}">删除</button>
+        </div></div>`;
+      }
+      if (contentKind === 'comments'){
+        const p = n.post || {};
+        return `<div class="item"><div class="body">
+          <div class="txt">${esc(n.content)}</div>
+          ${p.content ? `<div class="ctx">原帖：${esc(p.content)}</div>` : ''}
+          <div class="meta"><span>${fmtTime(n.createdAt)}</span><span>赞 ${n.likeCount||0}</span>
+            <span>${n.isAnonymous?'匿名':'实名'}</span><span style="font-family:var(--mono);color:var(--dim2)">${esc(n.id)}</span></div>
+        </div><div class="acts">
+          <button class="btn sm danger" data-del="comment" data-id="${esc(n.id)}">删除</button>
+        </div></div>`;
+      }
+      const c = n.comment || {}, pp = c.post || {};
+      return `<div class="item"><div class="body">
+        <div class="txt">${esc(n.content)}</div>
+        ${c.content ? `<div class="ctx">回的是：${esc(c.content)}</div>` : ''}
+        ${pp.content ? `<div class="ctx">所在帖：${esc(pp.content)}</div>` : ''}
+        <div class="meta"><span>${fmtTime(n.createdAt)}</span>
+          <span style="font-family:var(--mono);color:var(--dim2)">${esc(n.id)}</span></div>
+      </div><div class="acts">
+        <button class="btn sm danger" data-del="subcomment" data-id="${esc(n.id)}">删除</button>
+      </div></div>`;
+    }).join('');
+    box.querySelectorAll('[data-del]').forEach(b=>{
+      b.onclick = () => delItem(b.dataset.del, b.dataset.id, b);
+    });
+  } catch(e){
+    box.innerHTML = `<div class="empty" style="color:var(--bad)">${esc(e.message)}</div>`;
+  }
+}
+async function delItem(kind, id, btn){
+  const label = {post:'帖子', comment:'评论', subcomment:'楼中楼回复'}[kind] || kind;
+  if (!confirm(`确定删除这条${label}？\n\n${id}\n\n删除后不可恢复。`)) return;
+  busy(btn, true);
+  try{
+    await post('/api/delete', {kind, id, account:S.active_account});
+    toast(label + '已删除');
+    loadContent();
+  } catch(e){ toast(e.message, 'err'); busy(btn, false); }
+}
+
+/* ---------- 调试台 ---------- */
+async function dbgPost(force, btn){
+  const txt = $('#dbgPostText').value.trim();
+  if (!txt) return toast('先写点内容', 'err');
+  const [tid, sid] = ($('#dbgTopic').value || '|').split('|');
+  const b = btn; busy(b, true);
+  try{
+    const d = await post('/api/action', {kind:'post', content:txt, topic_id:tid, subtopic_id:sid, force, account:S.active_account});
+    if (d.dry) toast('预览：' + d.preview.slice(0,40) + '…  真发请点「直接发出」');
+    else { toast('已发出，帖子 ID ' + d.id); $('#dbgPostText').value=''; }
+  } catch(e){ toast(e.message, 'err'); }
+  busy(b, false);
+}
+async function dbgComment(force, btn){
+  const pid = $('#dbgPostId').value.trim(), txt = $('#dbgCmtText').value.trim();
+  if (!pid || !txt) return toast('帖子 ID 和评论内容都要填', 'err');
+  const b = btn; busy(b, true);
+  try{
+    const d = await post('/api/action', {kind:'comment', post_id:pid, content:txt, force, account:S.active_account});
+    if (d.dry) toast('预览：' + d.preview.slice(0,40) + '…');
+    else { toast('评论已发出 ' + d.id); $('#dbgCmtText').value=''; }
+  } catch(e){ toast(e.message, 'err'); }
+  busy(b, false);
+}
+async function dbgLike(kind, dry, btn){
+  const pid = $('#dbgPostId').value.trim();
+  if (!pid) return toast('先填帖子 ID', 'err');
+  const b = btn; busy(b, true);
+  try{
+    const d = await post('/api/action', {kind, post_id:pid, force:!dry, account:S.active_account});
+    toast(d.dry ? ('预览：' + d.preview) : (kind==='like'?'已点赞':'已取消赞'));
+  } catch(e){ toast(e.message, 'err'); }
+  busy(b, false);
+}
+async function dbgGen(key, btn){
+  const b = btn; busy(b, true);
+  try{
+    const sample = $('#dbgPostText').value.trim() || $('#dbgCmtText').value.trim() || $('#llmSample').value.trim();
+    const d = await post('/api/action', {kind:'gen', prompt_key:key, sample, account:S.active_account});
+    if (!d.ok){ toast('生成失败：' + d.error, 'err'); }
+    else {
+      const target = key==='post' ? $('#dbgPostText') : $('#dbgCmtText');
+      target.value = d.text;
+      const extra = d.angle ? `｜${d.topic}·${d.angle.slice(0,12)}` : (d.style ? `｜${d.style.slice(0,10)}` : '');
+      toast(`已生成（${d.ms}ms${extra}）`);
+    }
+  } catch(e){ toast(e.message, 'err'); }
+  busy(b, false);
+}
+async function fillLatest(){
+  try{
+    const d = await api('/api/content?kind=feed&account=' + encodeURIComponent(S.active_account));
+    const n = (d.edges||[])[0]?.node;
+    if (n){ $('#dbgPostId').value = n.id; toast('已填入：' + n.content.slice(0,24)); }
+    else toast('没取到帖子', 'err');
+  } catch(e){ toast(e.message, 'err'); }
+}
+async function llmTest(){
+  const key = $('#llmPromptKey').value, sample = $('#llmSample').value.trim();
+  const p = (S.prompts||{})[key] || {};
+  let sys = p.system || '', usr = p.user || '';
+  for (const [k,v] of Object.entries({post:sample, their:sample, seed:sample,
+        angle:sample, topic:'抛抛帖子', style:'只写一个动作', time:'刚刚'})){
+    sys = sys.split('{'+k+'}').join(v); usr = usr.split('{'+k+'}').join(v);
+  }
+  $('#llmOut').textContent = '请求中…';
+  try{
+    const d = await post('/api/llm/test', {system:sys, user:usr, account:S.active_account});
+    $('#llmOut').textContent = d.ok
+      ? `✅ ${d.ms}ms · ${d.tokens||'?'} tokens · ${d.model}\n\n${d.text}`
+      : `❌ ${d.error}`;
+  } catch(e){ $('#llmOut').textContent = '❌ ' + e.message; }
+}
+async function loadHistory(){
+  const box = $('#historyList');
+  try{
+    const rows = await api('/api/history?account=' + encodeURIComponent(S.active_account));
+    if (!rows.length){ box.textContent = '还没有动作记录'; return; }
+    box.innerHTML = rows.slice(0,60).map(r=>`<div style="display:flex;gap:10px;padding:5px 0;border-bottom:1px solid var(--line)">
+      <span style="color:var(--accent2);width:64px;flex:none">${esc(r.kind)}</span>
+      <span style="flex:1;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.meta||r.target)}</span>
+      <span style="color:var(--dim2);font-size:11.5px">${esc(r.time)}</span></div>`).join('');
+  } catch(e){ box.textContent = e.message; }
+}
+
+/* ---------- 日志 ---------- */
+async function loadLogs(){
+  try{
+    const lines = await api('/api/logs?n=200');
+    const box = $('#logBox');
+    const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+    box.textContent = lines.length ? lines.join('\n') : '(还没有日志)';
+    if (stick) box.scrollTop = box.scrollHeight;
+  } catch(e){ $('#logBox').textContent = e.message; }
+}
+
+/* ---------- 动作 ---------- */
+async function toggleDry(){
+  const live = $('#dryToggle').checked;
+  try{
+    await post('/api/config', {patch:{dry_run: !live}});
+    await refresh(true);
+    toast(live ? '已切到 LIVE —— 会真的发到论坛' : '已切回 DRY —— 只写日志', live?'err':'ok');
+  } catch(e){ toast(e.message, 'err'); }
+}
+async function refreshToken(){
+  try{
+    const d = await post('/api/token/refresh', {});
+    toast(d.rotated ? `已续期：access ${d.access_text} / refresh ${d.refresh_text}` : '其他进程刚续过，无需重复');
+    refresh(true);
+  } catch(e){ toast(e.message, 'err'); }
+}
+async function daemon(act){
+  try{
+    const d = await post('/api/daemon', {action:act});
+    if (!d.ok) toast(d.error, 'err');
+    else { toast(act==='start' ? 'daemon 已启动（PID '+d.pid+'）' : 'daemon 已停止'); }
+    setTimeout(()=>refresh(false), 800);
+  } catch(e){ toast(e.message, 'err'); }
+}
+async function saveLLM(){
+  const patch = {llm:{
+    base_url: $('#llmBase').value.trim(),
+    model: $('#llmModel').value.trim(),
+    temperature: parseFloat($('#llmTemp').value) || 0.9
+  }};
+  const k = $('#llmKey').value.trim();
+  if (k) patch.llm.api_key = k;
+  try{
+    await post('/api/config', {patch});
+    $('#llmKey').value = '';
+    toast('LLM 配置已保存');
+    refresh(true);
+  } catch(e){ toast(e.message, 'err'); }
+}
+async function switchAccount(btn){
+  const name = $('#acctSel').value;
+  if (!name) return;
+  if (name === S.active_account) return toast('已经是这个账号了');
+  busy(btn, true);
+  await switchView(name);
+  busy(btn, false);
+}
+async function saveGuard(){
+  const nums = s => s.split(/[,，\s]+/).map(x=>parseInt(x,10)).filter(x=>!isNaN(x));
+  const dl = nums($('#dl').value), hl = nums($('#hl').value);
+  if (dl.length!==4 || hl.length!==4) return toast('每日/每小时上限都要填 4 个数字：发帖,评论,回复,赞', 'err');
+  try{
+    await post('/api/config', {patch:{guard:{
+      quiet_hours:[+$('#qStart').value, +$('#qEnd').value],
+      jitter_seconds:[+$('#jMin').value, +$('#jMax').value],
+      daily_limits:{post:dl[0], comment:dl[1], reply:dl[2], like:dl[3]},
+      hourly_limits:{post:hl[0], comment:hl[1], reply:hl[2], like:hl[3]},
+      skip_keywords: $('#kw').value.split(/[,，、\n\s]+/).map(s=>s.trim()).filter(Boolean)
+    }}});
+    toast('风控参数已保存');
+    refresh(false);
+  } catch(e){ toast(e.message, 'err'); }
+}
+async function runTask(key, btn){
+  busy(btn, true);
+  try{
+    const d = await post('/api/run', {task:key});
+    toast(`${d.ran?'已执行':'未执行'}：${d.message}`, d.ran?'ok':'err');
+    loadLogs();
+  } catch(e){ toast(e.message, 'err'); }
+  busy(btn, false);
+}
+async function saveTask(card, key){
+  const g = k => card.querySelector(`[data-k="${k}"]`);
+  const patch = {tasks:{}};
+  const cur = (S.tasks||{})[key] || {};
+  const t = {enabled: !!cur.enabled};
+  if (key === 'scheduled_post'){
+    t.times = (g('times').value||'').split(/[,，\s]+/).map(s=>s.trim()).filter(Boolean);
+    const tp = g('topicPair');
+    if (tp){ const [tid, sid] = (tp.value||'|').split('|'); t.topic_id = tid; t.subtopic_id = sid; }
+    t.content_pool = (g('content_pool').value||'').split('\n').map(s=>s.trim()).filter(Boolean);
+    t.seed = g('seed').value;
+  } else {
+    for (const el of card.querySelectorAll('[data-k]')){
+      const k = el.dataset.k;
+      if (el.type === 'number') t[k] = parseInt(el.value||'0',10);
+      else if (el.tagName === 'SELECT') t[k] = el.value === 'true';
+      else if (el.type === 'text') t[k] = el.value;
+    }
+  }
+  patch.tasks[key] = t;
+  try{
+    const d = await post('/api/task', {account:S.active_account, key, patch:{...cur, ...t}});
+    S = d;
+    toast('已保存到「' + (S.accounts.find(x=>x.name===S.active_account)||{}).label + '」：' + TASK_META[key].name);
+    renderTasks(); bindTaskEvents();
+  } catch(e){ toast(e.message, 'err'); }
+}
+async function toggleTask(key, el){
+  const cur = (S.tasks||{})[key] || {};
+  try{
+    const d = await post('/api/task', {account:S.active_account, key, patch:{...cur, enabled: el.checked}});
+    S = d;
+    renderTop(); renderTasks(); bindTaskEvents(); fillAcctSelects();
+    toast((el.checked?'已启用 ':'已停用 ') + TASK_META[key].name);
+  } catch(e){ toast(e.message, 'err'); el.checked = !el.checked; }
+}
+function bindTaskEvents(){
+  $$('.task').forEach(card=>{
+    const key = card.dataset.task;
+    card.querySelector('[data-act="run"]').onclick = e => runTask(key, e.target);
+    card.querySelector('[data-act="toggle"]').onclick = () => card.classList.toggle('open');
+    card.querySelector('[data-act="enable"]').onchange = e => toggleTask(key, e.target);
+    card.querySelector('[data-act="save"]').onclick = () => saveTask(card, key);
+  });
+}
+async function savePrompt(card, key){
+  const q = f => card.querySelector(`[data-pf="${f}"]`);
+  const b = card.querySelector('[data-pact="save"]');
+  busy(b, true);
+  try{
+    const d = await post('/api/prompt', {
+      key, account:S.active_account,
+      system:q('system').value, user:q('user').value, enabled:q('enabled').checked
+    });
+    S.prompts = d;
+    card.querySelector('[data-role="pres"]').textContent = '已保存 ' + new Date().toLocaleTimeString();
+    toast('prompt「' + key + '」已保存');
+  } catch(e){ toast(e.message, 'err'); }
+  busy(b, false);
+}
+async function tryPrompt(card, key){
+  const q = f => card.querySelector(`[data-pf="${f}"]`);
+  const b = card.querySelector('[data-pact="try"]');
+  const res = card.querySelector('[data-role="pres"]');
+  const sample = key==='post' ? '随手写点今天的校园日常' : '今天食堂的饭好咸，吃了两口就倒了';
+  let sys = q('system').value, usr = q('user').value;
+  for (const [k,v] of Object.entries({post:sample, their:key==='reply'?'谢谢你的回复，我也想不通':'',
+        seed:sample, angle:sample, topic:'抛抛帖子', style:'只写一个动作', time:'刚刚'})){
+    sys = sys.split('{'+k+'}').join(v); usr = usr.split('{'+k+'}').join(v);
+  }
+  busy(b, true); res.textContent = '生成中…';
+  try{
+    const d = await post('/api/llm/test', {system:sys, user:usr, account:S.active_account, max_tokens:200});
+    res.textContent = d.ok ? `→ ${d.text}  (${d.ms}ms)` : '❌ ' + d.error;
+    res.style.color = d.ok ? 'var(--ok)' : 'var(--bad)';
+  } catch(e){ res.textContent = '❌ ' + e.message; }
+  busy(b, false);
+}
+function bindPromptEvents(){
+  $$('[data-prompt]').forEach(card=>{
+    const key = card.dataset.prompt;
+    card.querySelector('[data-pact="save"]').onclick = () => savePrompt(card, key);
+    card.querySelector('[data-pact="try"]').onclick = () => tryPrompt(card, key);
+    const sw = card.querySelector('[data-pf="enabled"]');
+    sw.onchange = () => {
+      const tag = card.querySelector('[data-role="ptag"]');
+      tag.textContent = sw.checked ? '启用' : '停用';
+      tag.className = 'tag' + (sw.checked ? ' on' : '');
+    };
+  });
+}
+
+/* ---------- 框架 ---------- */
+/* ---------- 知识库 ---------- */
+let KB = null, kbCur = 'md', kbTimer = null;
+
+async function loadKB(force){
+  try{
+    KB = await api('/api/kb');
+  } catch(e){ toast('读取知识库失败：' + e.message, 'err'); return; }
+  const c = KB.corpus || {}, r = KB.rag || {};
+  $('#kbPosts').textContent = c.posts != null ? c.posts.toLocaleString() : '—';
+  $('#kbCmts').textContent  = c.comments != null ? c.comments.toLocaleString() : '—';
+  $('#kbSpan').textContent  = c.span && c.span[0]
+    ? (c.span[0].slice(0,7) + ' → ' + c.span[1].slice(0,7)) : '—';
+  $('#kbDocs').textContent  = r.docs != null ? r.docs.toLocaleString() : '未建';
+  $('#ragSparse').textContent = r.ready ? (r.docs||0).toLocaleString() + ' 文档' : '未建';
+  const D = r.dense || {};
+  const HS = KB.style || {};
+  $('#hsP50').textContent = HS.comment_p50 != null ? HS.comment_p50 + ' 字' : '—';
+  $('#hsSticker').textContent = HS.comment_sticker != null ? (HS.comment_sticker*100).toFixed(1) + '%' : '—';
+  $('#hsDot').textContent = HS.comment_dot != null ? (HS.comment_dot*100).toFixed(1) + '%' : '—';
+  $('#hsPost').textContent = HS.post_p50 != null ? HS.post_p50 + ' 字' : '—';
+  $('#hsBands').textContent = '长度分段（各 20%）：' + (HS.bands||[])
+    .map(b => b.lo + '-' + b.hi + ' 字').join(' · ');
+  $('#ragDense').textContent = D.ready
+    ? (D.count||0).toLocaleString() + ' 条 · ' + (D.size_mb||0) + 'MB' : '未建';
+  $('#ragEmbed').textContent  = r.embed_on ? (r.embed_model || '已配置') : '未配置';
+  $('#ragRerank').textContent = r.rerank_on ? (r.rerank_model || '已开启') : '关';
+  $('#kbSwitch').checked = !!KB.enabled;
+  $('#ragSwitch').checked = !!KB.rag_enabled;
+  $('#kbMd').textContent = KB.md || '（还没生成，点「全量重建」）';
+  $('#kbJson').value = JSON.stringify(KB.json || {}, null, 1);
+  $('#kbLog').textContent = KB.log || '（暂无构建日志）';
+  $('#kbHint').textContent = KB.stats && KB.stats.built_at
+    ? '构建于 ' + KB.stats.built_at.replace('T',' ') : '尚未构建';
+  $('#kbBuildHint').textContent = KB.building
+    ? ('构建中：' + (KB.step || '') + '…') : (KB.step ? ('上次：' + KB.step) : '');
+  if (KB.building && !kbTimer){
+    kbTimer = setInterval(()=>loadKB(), 2500);
+  } else if (!KB.building && kbTimer){
+    clearInterval(kbTimer); kbTimer = null;
+    toast('知识库构建结束');
+  }
+}
+
+async function probeRag(){
+  const el = $('#ragProbe');
+  el.textContent = '请求中…';
+  try{
+    const d = await api('/api/rag/probe');
+    const e = d.embed || {}, r = d.rerank || {}, v = d.dense || {};
+    el.textContent =
+      '编码：' + (e.ok ? ('✓ ' + e.ms + 'ms · ' + e.dim + ' 维') : ('✗ ' + (e.err || '失败'))) +
+      '　｜　整库扫描：' + (v.ok ? ('✓ ' + v.search_ms + 'ms（' + (v.docs||0).toLocaleString() + ' 条，最高 ' + v.top + '）') : ('✗ ' + (v.err || '未建库'))) +
+      '　｜　精排：' + (r.ok ? ('✓ ' + r.ms + 'ms · ' + (r.scores || []).join(' / ')) : ('✗ ' + (r.err || '未开启')));
+  }catch(err){ el.textContent = '测试失败：' + err.message; }
+}
+
+function kbTab(k, el){
+  kbCur = k;
+  $$('[data-kbtab]').forEach(t=>t.classList.toggle('active', t.dataset.kbtab===k));
+  $('#kbMd').style.display   = k==='md'   ? '' : 'none';
+  $('#kbJson').style.display = k==='json' ? '' : 'none';
+  $('#kbLog').style.display  = k==='log'  ? '' : 'none';
+  $('#kbSaveBtn').style.display = k==='json' ? '' : 'none';
+}
+
+async function saveKB(){
+  let obj;
+  try{ obj = JSON.parse($('#kbJson').value); }
+  catch(e){ return toast('JSON 格式错误：' + e.message, 'err'); }
+  try{
+    await post('/api/kb', {json: obj});
+    toast('已保存并重新渲染正文');
+    await loadKB(true);
+  } catch(e){ toast(e.message, 'err'); }
+}
+
+async function rebuildKB(steps){
+  try{
+    const d = await post('/api/kb/rebuild', {steps});
+    if (d && d.ok === false) return toast(d.error || '构建未启动', 'err');
+    toast('已开始构建，进度见下方日志');
+    setTimeout(()=>loadKB(), 1200);
+  } catch(e){ toast(e.message, 'err'); }
+}
+
+async function toggleKbFlag(key, on){
+  try{
+    await post('/api/config', {patch:{[key]:{enabled: !!on}}});
+    toast((on ? '已启用 ' : '已关闭 ') + (key === 'kb' ? '知识库常识' : '历史示范检索'));
+  } catch(e){ toast(e.message, 'err'); }
+}
+
+/* ---------- 待审队列 ---------- */
+let rvStatus = 'pending';
+const RV_NAME = {length:'长度', end:'断句', open:'开头', shape:'结构', detail:'细节', fact:'事实'};
+const RV_MAX  = {length:20, end:20, open:15, shape:15, detail:15, fact:15};
+
+function ago(sec){
+  sec = Math.max(0, sec|0);
+  if (sec < 60) return sec + ' 秒前';
+  if (sec < 3600) return Math.floor(sec/60) + ' 分钟前';
+  if (sec < 86400) return Math.floor(sec/3600) + ' 小时前';
+  return Math.floor(sec/86400) + ' 天前';
+}
+
+async function loadReview(status){
+  if (status) rvStatus = status;
+  try{
+    const d = await api('/api/review?status=' + rvStatus);
+    renderReview(d);
+  }catch(e){
+    $('#reviewList').innerHTML = '<div class="hint" style="padding:20px 0;color:#f87171">'
+      + esc(e.message) + '</div>';
+  }
+}
+
+async function rvBadge(){
+  try{
+    const d = await api('/api/review?status=pending');
+    const c = d.counts || {};
+    const n = (c.pending||0) + (c.approved||0);
+    const b = $('#navRv');
+    if (b){ b.style.display = n ? 'inline-block' : 'none'; b.textContent = n; }
+  }catch(e){}
+}
+
+function renderReview(d){
+  const items = d.items || [], c = d.counts || {};
+  $('#rvPending').textContent = c.pending || 0;
+  $('#rvApproved').textContent = c.approved || 0;
+  $$('#reviewTabs .tab').forEach(t => t.classList.toggle('active', t.dataset.rv === rvStatus));
+  const badge = $('#navRv');
+  const n = (c.pending||0) + (c.approved||0);
+  if (badge){ badge.style.display = n ? 'inline-block' : 'none'; badge.textContent = n; }
+
+  const box = $('#reviewList');
+  if (!items.length){
+    box.innerHTML = '<div class="hint" style="padding:26px 0">这个分类是空的。'
+      + (rvStatus === 'pending' ? '说明最近生成的帖子都过了 80 分，直接发了。' : '') + '</div>';
+    return;
+  }
+  box.innerHTML = items.map(it => {
+    const parts = it.parts || {};
+    const sc = it.score || 0;
+    const tone = sc >= 80 ? '#4ade80' : sc >= 62 ? '#f5b95c' : '#f87171';
+    const when = new Date((it.created || 0) * 1000)
+      .toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+    const editable = it.status === 'pending' || it.status === 'approved';
+    const chips = Object.keys(RV_MAX).filter(k => parts[k] !== undefined)
+      .map(k => {
+        const v = parts[k], full = RV_MAX[k];
+        const col = v >= full ? 'var(--dim2)' : (v >= full*0.6 ? '#f5b95c' : '#f87171');
+        return '<span style="color:' + col + '">' + RV_NAME[k] + ' ' + v + '/' + full + '</span>';
+      }).join('　');
+    return '<div class="card" style="margin-bottom:12px">'
+      + '<div class="card-h">'
+      +   '<h3>#' + it.id + '　' + esc(it.label || it.account) + '</h3>'
+      +   '<span class="pill" style="border-color:' + tone + '"><b style="color:' + tone + '">' + sc + '</b> 分</span>'
+      +   '<span class="pill">' + esc(it.board || '未定板块') + '</span>'
+      +   '<span class="pill">' + esc(it.form || '-') + '</span>'
+      +   '<span class="hint" style="margin-left:auto">' + when + ' · ' + ago(it.ago) + '</span>'
+      + '</div>'
+      + (editable
+          ? '<textarea id="rvText-' + it.id + '" rows="3">' + esc(it.content) + '</textarea>'
+          : '<div style="font-size:13.5px;line-height:1.75;white-space:pre-wrap">' + esc(it.content) + '</div>')
+      + '<div class="hint" style="margin-top:8px;line-height:1.7">' + chips + '</div>'
+      + (it.fixes ? '<div class="hint" style="margin-top:4px;color:#f5b95c">扣分项：' + esc(it.fixes) + '</div>' : '')
+      + (it.note ? '<div class="hint" style="margin-top:2px">备注：' + esc(it.note) + '</div>' : '')
+      + (editable
+          ? '<div class="row" style="margin-top:10px">'
+            + '<button class="btn sm primary" onclick="rvAct(' + it.id + ',\'publish\',this)">保存并立即发布</button>'
+            + '<button class="btn sm" onclick="rvAct(' + it.id + ',\'save\',this)">通过（排队发）</button>'
+            + '<button class="btn sm ghost" onclick="rvAct(' + it.id + ',\'rewrite\',this)">让模型再写一条</button>'
+            + '<button class="btn sm danger" onclick="rvAct(' + it.id + ',\'reject\',this)">打回</button>'
+            + '</div>'
+          : '<div class="hint" style="margin-top:8px">'
+            + (it.status === 'published' ? '已发布 ' + esc(it.published_id || '') : '状态：' + esc(it.status)) + '</div>')
+      + '</div>';
+  }).join('');
+}
+
+async function rvAct(id, action, btn){
+  const ta = document.getElementById('rvText-' + id);
+  const content = ta ? ta.value.trim() : undefined;
+  if (action === 'publish' || action === 'save'){
+    if (content !== undefined && content.length < 4){ toast('正文太短了', 'err'); return; }
+  }
+  busy(btn, true);
+  try{
+    const d = await post('/api/review', {id, action, content});
+    toast(d.message || '已处理');
+    await loadReview();
+    if (action === 'publish' || action === 'save') rvBadge();
+  }catch(e){
+    toast('操作失败：' + e.message, 'err');
+  }finally{ busy(btn, false); }
+}
+
+function switchTab(name){
+  curTab = name;
+  try { history.replaceState(null, '', '#' + name); } catch(e) {}
+  $$('.nav-item').forEach(n=>n.classList.toggle('active', n.dataset.tab===name));
+  $$('.page').forEach(p=>p.classList.toggle('active', p.id === 'page-'+name));
+  clearInterval(logTimer); logTimer = null;
+  clearInterval(kbTimer); kbTimer = null;
+  if (name==='logs'){ loadLogs(); logTimer = setInterval(loadLogs, 3000); return; }
+  if (name==='review'){ loadReview(); return; }
+  if (!S) return;
+  if (name==='content') loadContent();
+  if (name==='debug'){ loadHistory(); }
+  if (name==='accounts'){ renderAccounts(); }
+  if (name==='kb'){ loadKB(); }
+  if (name==='sync'){ loadPack(); }
+  if (name==='tasks'){ renderTasks(); renderPrompts(); bindTaskEvents(); bindPromptEvents(); renderKeys(); }
+}
+async function refresh(full){
+  try{
+    S = await api('/api/state');
+    renderTop();
+    renderStats();
+    fillAcctSelects();
+    if (full || curTab==='overview') renderOverview();
+    if (curTab==='accounts') renderAccounts();
+    if (curTab==='tasks' && full){ renderTasks(); renderPrompts(); bindTaskEvents(); bindPromptEvents(); }
+    if (curTab==='content' && full) loadContent();
+  } catch(e){
+    toast('读取状态失败：' + e.message, 'err');
+  }
+}
+function init(){
+  $$('.nav-item').forEach(n=> n.onclick = () => switchTab(n.dataset.tab));
+  $('#dryToggle').onchange = toggleDry;
+  $$('#page-content .tab').forEach(t=> t.onclick = () => {
+    $$('#page-content .tab').forEach(x=>x.classList.remove('active'));
+    t.classList.add('active'); contentKind = t.dataset.kind; loadContent();
+  });
+  $$('#reviewTabs .tab').forEach(t=> t.onclick = () => {
+    $$('#reviewTabs .tab').forEach(x=>x.classList.remove('active'));
+    t.classList.add('active'); loadReview(t.dataset.rv);
+  });
+  refresh(true).then(()=>{
+    $('#dbgTopic').innerHTML = topicOptions(S.defaults.topic_id, S.defaults.subtopic_id);
+    renderTasks(); renderPrompts(); bindTaskEvents(); bindPromptEvents();
+    renderAccounts(); loadHistory();
+    // 支持用 #accounts / #tasks / #content / #debug / #logs 直达
+    const h = (location.hash || '').slice(1);
+    if (h && h !== 'overview' && document.getElementById('page-' + h)) switchTab(h);
+  });
+  setInterval(()=>{
+    if (curTab==='overview') refresh(false);
+    if (curTab==='accounts') refresh(false);
+    if (curTab==='review') loadReview();
+  }, 15000);
+  rvBadge();
+  setInterval(rvBadge, 60000);
+}
+init();
+
+/* ================= 一键开号 / Key / 花名册 ================= */
+
+let _spawnTimer = null;
+
+async function spawnBots(btn){
+  const n = +($('#spawnCount').value || 1);
+  let ready = null;
+  try { ready = await api('/api/ready'); } catch(e){}
+  if (ready && !ready.llm){
+    toast('先去「任务与 Prompt」把 DeepSeek Key 填上，不然号生成了也不会说话', 'err');
+    return;
+  }
+  if (!confirm('将自动注册 ' + n + ' 个全新账号并接入矩阵。\n账号由程序生成，不会用到你已有的任何账号。继续？')) return;
+  busy(btn, true);
+  try{
+    await post('/api/spawn', {count: n});
+    $('#spawnProg').style.display = 'block';
+    $('#spawnLog').textContent = '';
+    pollSpawn(btn);
+  }catch(e){ toast(e.message, 'err'); busy(btn, false); }
+}
+
+function pollSpawn(btn){
+  clearTimeout(_spawnTimer);
+  api('/api/spawn/status').then(s => {
+    const total = s.total || 1, done = s.done || 0;
+    $('#spawnBar').style.width = Math.min(100, Math.round(done / total * 100)) + '%';
+    $('#spawnLog').innerHTML = (s.log || []).slice(-50).map(x =>
+      '<div style="color:' + (x.ok ? 'var(--ok)' : 'var(--err)') + '">' + x.t + '  ' + esc(x.text) + '</div>'
+    ).join('');
+    $('#spawnLog').scrollTop = 1e6;
+    $('#spawnTag').textContent = (s.running ? '进行中 ' : '完成 ') + done + '/' + total;
+    if (s.running){
+      _spawnTimer = setTimeout(() => pollSpawn(btn), 1200);
+    } else {
+      busy(btn, false);
+      const r = s.result || {};
+      toast('生成完成：成功 ' + (r.ok || 0) + ' 个' + ((r.fail || 0) ? ('，失败 ' + r.fail) : ''));
+      refresh(true);
+    }
+  }).catch(() => { _spawnTimer = setTimeout(() => pollSpawn(btn), 2500); });
+}
+
+function renderKeys(){
+  const r = (S && S.rag) || {};
+  const e = r.embed || {}, rr = r.rerank || {};
+  if ($('#kEmbBase')) $('#kEmbBase').value = e.base_url || '';
+  if ($('#kEmbModel')) $('#kEmbModel').value = e.model || '';
+  if ($('#kRrModel')) $('#kRrModel').value = rr.model || '';
+  if ($('#kRrOn')) $('#kRrOn').value = (rr.enabled === false) ? '0' : '1';
+  const tag = $('#vecState');
+  if (tag){
+    tag.textContent = e.has_key ? '向量已配' : '向量未配';
+    tag.className = 'tag' + (e.has_key ? ' on' : '');
+  }
+  api('/api/ready').then(x => {
+    const t = $('#spawnTag');
+    if (t && x) t.textContent = x.ready ? '可以生成' : '先填 Key';
+  }).catch(() => {});
+}
+
+async function saveKeys(btn){
+  busy(btn, true);
+  try{
+    const d = await post('/api/settings/keys', {
+      llm_base: $('#llmBase').value.trim(),
+      llm_key: $('#llmKey').value.trim(),
+      embed_base: $('#kEmbBase').value.trim(),
+      embed_model: $('#kEmbModel').value.trim(),
+      embed_key: $('#kEmbKey').value.trim(),
+      rerank_model: $('#kRrModel').value.trim(),
+      rerank_key: $('#kRrKey').value.trim(),
+      rerank_on: $('#kRrOn').value === '1',
+    });
+    $('#llmKey').value = ''; $('#kEmbKey').value = ''; $('#kRrKey').value = '';
+    toast(d.ready ? '两把 key 都齐了，可以开跑'
+                  : '已保存（LLM ' + (d.llm ? '✓' : '✗') + ' · 向量 ' + (d.embed ? '✓' : '✗') + '）',
+          d.ready ? 'ok' : 'err');
+    refresh(true);
+  }catch(e){ toast(e.message, 'err'); }
+  busy(btn, false);
+}
+
+let _pack = null;
+
+async function loadPack(force){
+  const box = $('#qrBox');
+  if (!box) return;
+  if (_pack && !force) return;
+  box.textContent = '生成中…';
+  try{
+    _pack = await api('/api/roster/pack');
+  }catch(e){ box.textContent = '读取失败：' + e.message; return; }
+  const d = _pack;
+  $('#packTag').textContent = d.n + ' 个号 · ' + d.bytes + ' 字节';
+  $('#rosterPreview').textContent = JSON.stringify((d.list || []).slice(0, 3), null, 1)
+    + (d.n > 3 ? '\n…（共 ' + d.n + ' 条）' : '');
+  box.innerHTML = '';
+  if (!d.n){ box.textContent = '还没有已注册的号'; return; }
+  try{
+    new QRCode(box, {
+      text: d.payload, width: 300, height: 300,
+      correctLevel: QRCode.CorrectLevel.L,
+      colorDark: '#000000', colorLight: '#ffffff',
+    });
+    $('#qrTag').textContent = 'L 级纠错 · ' + d.n + ' 个号';
+    $('#qrTag').className = 'tag on';
+  }catch(e){
+    box.textContent = '二维码放不下（' + d.bytes + ' 字节），改用下面的「下载 roster.json」';
+    $('#qrTag').textContent = '太大';
+    $('#qrTag').className = 'tag';
+  }
+}
+
+function copyRoster(){
+  if (!_pack) return toast('先生成', 'err');
+  navigator.clipboard.writeText(JSON.stringify(_pack.list, null, 1))
+    .then(() => toast('已复制 ' + _pack.n + ' 条'), () => toast('复制失败，用下载', 'err'));
+}
+
+function downloadRoster(){
+  if (!_pack) return toast('先生成', 'err');
+  const blob = new Blob([JSON.stringify(_pack.list, null, 1)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'roster.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+}
+
+/* 第一次进来如果两把 key 都没填，直接把人带到设置页 */
+setTimeout(async () => {
+  try{
+    const r = await api('/api/ready');
+    if (r && !r.ready){
+      switchTab('tasks');
+      toast('先填 DeepSeek 和 SiliconFlow 两把 Key，再回到「账号矩阵」生成号', 'err');
+    }
+  }catch(e){}
+}, 1500);
+</script>
+</body>
+</html>

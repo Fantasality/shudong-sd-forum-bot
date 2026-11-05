@@ -1,0 +1,233 @@
+{
+ "app_id": "wxeeda8eef0cb4339e",
+ "school_id": "U2Nob29sOjIy",
+ "my_user_id": "",
+ "active_account": "",
+ "accounts": {},
+ "default_topic_id": "VG9waWM6MjE1",
+ "default_subtopic_id": "U3VidG9waWM6MzQx",
+ "is_anonymous": false,
+ "dry_run": true,
+ "_note_is_anonymous": "服务端已关闭「随机昵称」功能，is_anonymous=true 会直接报错。实测只有 false 能发出，所以这里必须是 false。",
+ "llm": {
+  "base_url": "https://api.deepseek.com/v1",
+  "api_key": "",
+  "model": "deepseek-chat",
+  "temperature": 0.9,
+  "max_tokens": 160
+ },
+ "guard": {
+  "quiet_hours": [
+   0,
+   7
+  ],
+  "jitter_seconds": [
+   5,
+   15
+  ],
+  "skip_keywords": [
+   "举报",
+   "寻人",
+   "失物",
+   "急救",
+   "自杀",
+   "处分",
+   "报警",
+   "借钱",
+   "网贷",
+   "代考",
+   "作弊",
+   "抑郁",
+   "分手",
+   "去世",
+   "生病",
+   "代购",
+   "拼单",
+   "二手",
+   "转让",
+   "招租",
+   "兼职",
+   "招聘",
+   "优惠",
+   "折扣",
+   "包邮",
+   "下单",
+   "扫码",
+   "加微信",
+   "刷单",
+   "贷款",
+   "办卡",
+   "卫生巾",
+   "护翼",
+   "避孕",
+   "约炮",
+   "开房",
+   "代写",
+   "代做",
+   "代课",
+   "代刷",
+   "代跑",
+   "枪手",
+   "论文代",
+   "作业代",
+   "替考",
+   "包过"
+  ],
+  "daily_limits": {
+   "post": 3,
+   "comment": 8,
+   "reply": 15,
+   "like": 30
+  },
+  "hourly_limits": {
+   "post": 1,
+   "comment": 8,
+   "reply": 5,
+   "like": 8
+  }
+ },
+ "tasks": {
+  "scheduled_post": {
+   "enabled": true,
+   "times": [
+    "09:30",
+    "21:00"
+   ],
+   "topic_id": "VG9waWM6MjE1",
+   "subtopic_id": "U3VidG9waWM6MzQx",
+   "seed": "写一条今天的校园日常，比如食堂、图书馆、天气、宿舍、考试、交通、新歌、动画等等等等，利用当前时间生成哈希随机数，生成随机内容",
+   "content_pool": [],
+   "use_prompt": true
+  },
+  "reply_comments": {
+   "enabled": false,
+   "interval": 300,
+   "max_per_run": 3
+  },
+  "autolike": {
+   "enabled": true,
+   "interval": 7200,
+   "max_per_run": 3,
+   "llm_filter": false
+  },
+  "random_comment": {
+   "enabled": true,
+   "interval": 1200,
+   "max_per_run": 2,
+   "skip_if_comments_over": 20
+  }
+ },
+ "prompts": {
+  "post": {
+   "label": "定时发帖",
+   "enabled": true,
+   "system": "你是苏州大学的学生，在校园社区发一条日常帖子。内容要具体、有画面感，像真人随手写的，带上只有本校人才知道的地名/时间/细节。用平时说话的语气，不要写成诗、文案或金句，可以啰嗦、可以不完美。不要营销、不要提问求关注、不要暴露 AI，不要用「家人们」「谁懂啊」这类网络烂梗开头。只输出帖子正文，不要引号。",
+   "user": "{seed}"
+  },
+  "reply": {
+   "label": "回复评论",
+   "enabled": true,
+   "system": "你在大学社区回复别人给你的评论。用一句自然、有温度的话回应，像随口接的一句，不要客套开头，不要说教，不要暴露自己是 AI。只输出回复本身，不要引号。大部分评论是不带表情的，别每条都挂 [流泪][期待] 这种。",
+   "user": "帖子：{post}\n对方说：{their}"
+  },
+  "comment": {
+   "label": "随机评论",
+   "enabled": true,
+   "system": "你是苏州大学的学生，正在浏览校园社区。看到一条帖子，写一句真实、轻松、像真人随口说的话。可以带一点校园生活感，但不要说教、不要复读标题、不要暴露自己是 AI。只输出评论本身，不要引号。如果帖子的情绪是负面的，就只表达共情，不要给建议。大部分评论是不带表情的，别每条都挂 [流泪][期待] 这种。",
+   "user": "帖子：{post}"
+  },
+  "like": {
+   "label": "点赞筛选（可选）",
+   "enabled": false,
+   "system": "判断下面这条帖子是否值得点一个赞。只回答 YES 或 NO，不要任何解释。广告、引战、纯水、求关注、无意义内容答 NO。",
+   "user": "{post}"
+  }
+ },
+ "web": {
+  "host": "127.0.0.1",
+  "port": 8765
+ },
+ "topics": {
+  "校园生活": {
+   "id": "VG9waWM6MjE1",
+   "subtopics": {
+    "抛抛帖子": "U3VidG9waWM6MzQx",
+    "求助提问箱": "U3VidG9waWM6MzQ1",
+    "新生专栏": "U3VidG9waWM6NjYx",
+    "苏大迷惑大赏": "U3VidG9waWM6MzQy",
+    "今天吃什么": "U3VidG9waWM6MzQ0",
+    "女孩，女孩": "U3VidG9waWM6MzQ3",
+    "今天不开心": "U3VidG9waWM6MzQz",
+    "打工电波": "U3VidG9waWM6MzQ4",
+    "苏大神奇动物": "U3VidG9waWM6MzQ2",
+    "苏大恋爱日常": "U3VidG9waWM6MzQ5"
+   }
+  },
+  "校园集市": {
+   "id": "VG9waWM6MjE2",
+   "subtopics": {
+    "二手交易": "U3VidG9waWM6MzQw",
+    "失物招领": "U3VidG9waWM6MzM5",
+    "拼团拼单": "U3VidG9waWM6NTE0"
+   }
+  }
+ },
+ "kb": {
+  "enabled": true,
+  "budget": 800,
+  "path": "kb/knowledge.json"
+ },
+ "rag": {
+  "enabled": true,
+  "shots": 3,
+  "budget": 520,
+  "_note": "不填 key 也能用（本地倒排检索）。填了 embedding key 会自动多一层语义重排；rerank 打开后再多一层精排。",
+  "embed": {
+   "base_url": "https://api.siliconflow.cn/v1",
+   "api_key": "",
+   "model": "BAAI/bge-m3"
+  },
+  "rerank": {
+   "enabled": true,
+   "base_url": "https://api.siliconflow.cn/v1",
+   "api_key": "",
+   "model": "BAAI/bge-reranker-v2-m3"
+  }
+ },
+ "review": {
+  "mode": "gate",
+  "min_score": 80,
+  "queue_accounts": [
+   "nerd",
+   "tcz_se",
+   "tcz_tx",
+   "dsh_ps",
+   "dsh_me",
+   "ych_tr",
+   "fut_mb"
+  ],
+  "_说明": "gate=评分达标的直发、不达标的进待审；queue=全部进待审；off=关闭闸门。queue_accounts 里的号无论分数都进待审（灰度用）。"
+ },
+ "whisper": {
+  "enabled": false,
+  "drop_post_id": "",
+  "master_user_ids": [
+   "",
+   ""
+  ],
+  "poll_seconds": 120,
+  "mode": "free",
+  "watch_account": "bot"
+ },
+ "sentinel": {
+  "enabled": true,
+  "watch_account": "bot",
+  "squad": 4,
+  "gap": [
+   15,
+   35
+  ],
+  "poll_seconds": 30
+ },
+ "_help": "第一次启动：在网页「任务与 Prompt」里填 DeepSeek 和 SiliconFlow 两把 Key，然后去「账号矩阵」点「一键生成机器人号」。"
+}

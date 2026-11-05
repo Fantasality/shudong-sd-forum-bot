@@ -1,0 +1,23 @@
+# 运行期产生的东西，不进仓库
+bot/config.json
+bot/tokens*.json
+bot/account_*.json
+bot/state.db
+bot/state.db-*
+bot/logs/
+bot/__pycache__/
+bot/**/__pycache__/
+*.pyc
+
+# 语料与向量库（体积大，随发行包单独给）
+bot/kb/raw.db
+bot/kb/dense.db
+bot/kb/dense.f32
+bot/kb/dense_meta.json
+bot/kb/rag.db
+bot/kb/rag.db-*
+bot/kb/samples.json
+
+# 系统
+.DS_Store
+Thumbs.db
