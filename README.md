@@ -1,4 +1,4 @@
-# 树洞 · 校园匿名社区机器人（一键启动包）
+# 鼠洞 · 校园匿名社区机器人（一键启动包）
 
 **简体中文** ｜ [English version](README.en.md) ｜ [免责声明](DISCLAIMER.md)
 
