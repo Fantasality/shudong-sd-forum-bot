@@ -152,12 +152,21 @@ def _age_days(day: str) -> int:
         return 0
 
 
+# 到处都是的地点。写「宿舍」「食堂」不算提供了具体信息，因为人人都在写；
+# 只有「澡堂」「校车」「快递点」这种才把场景钉死。两者给的分要不一样，
+# 否则具体性排序会把宿舍帖顶到前面——实测生成 29% 在写宿舍，真人只有 5%。
+_COMMON_PLACE = ("食堂", "宿舍", "图书馆", "教室")
+
+
 def _concrete(text: str) -> int:
     """具体性打分：有数字、有地点、有钟点、有过去动作，才是能写成一条帖子的素材。"""
     s = 0
     if _DIGIT.search(text):
         s += 2
-    s += min(2, sum(1 for w in _PLACE if w in text))
+    places = [w for w in _PLACE if w in text]
+    rare = [w for w in places if w not in _COMMON_PLACE]
+    common = [w for w in places if w in _COMMON_PLACE]
+    s += min(4, len(rare) * 2) + min(1, len(common))
     s += min(2, sum(1 for w in _TIME if w in text))
     s += min(3, sum(1 for w in _ACT if w in text))
     if any(w in text for w in ("我", "本人", "咱")):
@@ -172,11 +181,15 @@ def _concrete(text: str) -> int:
 
 
 def draw(account: str = "", seed: int | None = None, board: str | None = None,
-         avoid_boards: set[str] | None = None) -> dict | None:
+         avoid_boards: set[str] | None = None,
+         avoid_kw: tuple[str, ...] | None = None) -> dict | None:
     """在指定板块里按系统时间种子抽一条真实帖。
 
     板块内的抽法是「先随机取 12 条，按具体性排序，再从前四里随机」：
     纯 r.choice 常常抽到「捞个周二下午」这种没场景的，永远取第一条又天天一样。
+
+    avoid_kw 用来压题材配额：宿舍/寝室这类场景在种子池里占比过高，
+    实测生成 33% 在写宿舍，而真实语料只有 7.5%。
     """
     rows = pool()
     if not rows:
@@ -192,6 +205,10 @@ def draw(account: str = "", seed: int | None = None, board: str | None = None,
         boards = [b for b in by if b not in avoid] or list(by)
         pick = r.choice(boards)
     cands = r.sample(by[pick], min(16, len(by[pick])))
+    if avoid_kw:
+        filtered = [c for c in cands if not any(k in c[2] for k in avoid_kw)]
+        if len(filtered) >= 1:      # 配额一旦触发，剩一条也要用
+            cands = filtered
     # 优先老帖：放了一个半月还没过期的内容，说明它本身不依赖时间点
     old = [c for c in cands if _age_days(c[3]) >= OLD_DAYS]
     if len(old) >= 3:
@@ -309,9 +326,24 @@ def plan(brain, account: str = "", persona: str = "", tries: int = 2,
                 break
         pool_boards = [b for b in KIND_BOARDS.get(kind, ["抛抛帖子"]) if b not in avoid]
         board = r.choice(pool_boards or KIND_BOARDS.get(kind, ["抛抛帖子"]))
+        # 高频场景配额。种子池里「食堂 / 宿舍 / 图书馆」这些场景占比远高于真实语料，
+        # 不压的话实测生成：食堂 35%、图书馆 20%、宿舍 20%，
+        # 而真实帖子分别是 7.8% / 6.5% / 5.8%——读十条有五条在这三个地方。
+        _SCENE_QUOTA = (
+            ("宿舍", ("宿舍", "寝室", "舍友", "室友", "舍楼下"), 0.04),
+            ("食堂", ("食堂", "打饭", "窗口", "饭菜", "外卖", "米线", "香锅", "炒菜"), 0.05),
+            ("图书馆", ("图书馆", "自习", "闭馆", "占座"), 0.06),
+        )
+        blocked: list[str] = []
+        for _name, kws, cap in _SCENE_QUOTA:
+            n_hit = sum(1 for h in hist
+                        if any(k in (h.get("topic") or "") for k in kws))
+            if hist and n_hit / len(hist) >= cap:
+                blocked.extend(kws)
+        avoid_kw = tuple(blocked) or None
         d = draw(account, seed=None if i == 0 else
                  (zlib.crc32(f"{time.time_ns()}:{account}:topic:{i}".encode()) & 0xFFFFFFFF),
-                 board=board)
+                 board=board, avoid_kw=avoid_kw)
         if not d:
             break
         d.update(kind=kind)

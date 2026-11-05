@@ -133,8 +133,10 @@ class Ctx:
                           "分成两三段，每段之间空一行。不要写成一大坨。")
             else:
                 # 短内容：语料里只有 9.2% 的帖子出现句号，模型几乎每句都收句号，
-                # 是一眼能看出来的机器味
-                system = f"{system}\n\n不要用句号，断句用逗号或者直接换行。"
+                # 是一眼能看出来的机器味。但也不能全禁——仍有 8% 的评论带句号，
+                # 一刀切会让「句号率」这个指标直接归零，同样是破绽。
+                system = (f"{system}\n\n断句用逗号或者直接换行，别每句都收句号；"
+                          "只有一句话特别长、不加句号会读串的时候才用。")
             if self.profile:
                 # 稳定身份，不主动说出来，只影响「会注意到什么」
                 system = (f"你的固定身份（别自我介绍，也别提这些设定）：{self.profile}\n\n"
@@ -228,6 +230,24 @@ def campus_violation(text: str, campus: str) -> tuple[bool, str]:
         return True, (f"这条里的事实不对（{bad[0]}）。你在{campus}校区，"
                       "把地点和院系改成本校区的，不确定就别写具体名字。")
     return False, ""
+
+
+def ensure_sticker(text: str, pl: dict, scene: str = "") -> str:
+    """该带表情的条目，模型没带就补一个。
+
+    语料里 23 字以上的评论 33% 带表情，而 prompt 里写「必须带」模型只有一半时候听。
+    光靠提示词，实测表情率 13%，真值 27%——差一倍，是能看出来的破绽。
+    这里在文本末尾补，位置就是结尾，跟真人的习惯一致。
+    """
+    if not text or not pl.get("sticker"):
+        return text
+    if re.search(r"\[[^\]]{1,6}\]\s*$", text):
+        return text
+    try:
+        from . import human as _h
+        return text.rstrip() + _h._pick_sticker(scene)
+    except Exception:
+        return text
 
 
 def _clean_content(text: str, lo: int = 12, hi: int = 220) -> str | None:
@@ -825,6 +845,80 @@ def autolike(ctx: Ctx, max_n: int = 3) -> tuple[bool, str]:
 # ---------- 4. 随机评论 ----------
 
 
+def build_comment_prompt(ctx: Ctx, post_text: str, board: str,
+                         prev: list[str] | None = None,
+                         post_id: str = "") -> dict:
+    """构建一条评论要发给模型的东西。
+
+    抽成模块级函数是为了让离线评估跑**同一条路径**：评估脚本如果自己另拼一套
+    prompt，测出来的分数跟线上没关系，改了也不知道变好还是变坏。
+
+    prev 是这帖下面已经有人说过的话，会拼进 system 末尾防撞车。
+    """
+    prev = prev or []
+    st = persona.pick_comment_style(ctx.persona)
+    scene = rag.classify(post_text, board)
+    mp = mood.plan(post_text, board)
+    pl = human.plan("comment", board, scene, ctx.rng("shape"))
+    # 偶尔就是一句「蹲」「顶」「？」，这种条目不值得调模型，也更像真人
+    early = human.reaction(scene, post_text, board, rng=ctx.rng("react"))
+    if early:
+        return {"style": st, "board": board, "plan": pl, "system": "", "user": "",
+                "enabled": False, "early": early, "mood": mp, "longform": None,
+                "scene": scene}
+
+    # 强情感帖才给超长档。语料里情绪帖下 60% 的评论超过 100 字，
+    # 而全站只有 2.9%——长评论是强情感帖的配套，不是普遍现象。
+    lf = longform.plan_comment(post_text, mp, ctx.rng("long"))
+    if lf:
+        pl = dict(pl, lo=lf["lo"], hi=lf["hi"], newline=True, longform=lf["kind"])
+        length_txt = longform.brief_comment(lf)
+    else:
+        if mp["long"]:
+            # 人家写了三百字，回五个字就是敷衍。长帖强制走长档
+            pl = dict(pl, lo=38, hi=82)
+        length_txt = human.brief(pl)
+
+    system, user, enabled = ctx.prompt(
+        "comment", post=post_text[:300], style=st, board=board,
+        scene=scene, sample=post_text[:200], post_id=post_id,
+        length=length_txt, hint=human.sticker_hint(pl),
+        long_text=bool(lf),
+    )
+    if enabled:
+        # 评论也得知道今天几号、下没下雨。不然随口一句「今天还下着雨」，
+        # 或者把现在当成别的月份，本地人一眼看出是假的。
+        try:
+            ev = events.brief(ctx.campus, with_notice=False)
+            if ev:
+                user = (f"{user}\n\n【今天】{ev}。这只是背景，别把日期写进正文；"
+                        "不要自己推月份；今天没下雨就别写雨、伞、淋湿。")
+        except Exception:
+            pass
+        # 姿态放最后：前面是知识库和示范，通用约束在上面，这里是最具体的一条。
+        # 长文例外：mood.brief 是「说一句你在」这种短评指令，会跟拆解/分析打架
+        system = (f"{system}\n\n{longform.mood_note(mp)}" if lf
+                  else f"{system}\n\n{mood.brief(mp)}")
+        if prev:
+            body = "\n".join(f"- {x}" for x in prev[:8])
+            system = (
+                f"{system}\n\n【这帖下面已经有人说过的】\n{body}\n"
+                "上面这些角度、句式和开头都别再重复：别重复同一条建议，"
+                "别套同一个句式，也别用同一句话起头。"
+                "换一个别人没提到的角度，或者只说你自己会怎么做。"
+            )
+        # 评论最容易露馅的地方，是把一句随口接话写成小建议。
+        # 「好处是…坏处是…」「先想清楚再行动」这种结构，真人在回帖里不写。
+        # 「确实」「其实」这类填充词也是：真人回帖直接说事，不先垫一句认同。
+        system = (f"{system}\n\n不要分析利弊、不要罗列理由、不要用「先…再…」"
+                  "「建议你」「先想清楚」这类句式，不要给完整方案。"
+                  "不要用「确实」「其实」「总的来说」「不得不说」这些垫词。"
+                  "像在群里顺口接一句，说完就停。")
+    return {"style": st, "board": board, "plan": pl, "system": system, "user": user,
+            "enabled": enabled, "early": None, "mood": mp, "longform": lf,
+            "scene": scene}
+
+
 def random_comment(ctx: Ctx, max_n: int = 1) -> tuple[bool, str]:
     t0 = time.time()
     # 吃货号不主动评价别人。它的人设只关心吃什么、多少钱，在别人崩溃的帖子下面
@@ -920,61 +1014,16 @@ def random_comment(ctx: Ctx, max_n: int = 1) -> tuple[bool, str]:
             log.debug("拉同帖评论失败 %s: %s", n["id"][-6:], e)
         same_post[i] = prev
 
-        st = persona.pick_comment_style(ctx.persona)
         bd = ((n.get("subtopic") or {}).get("name") or (n.get("topic") or {}).get("name") or "")
-        scene = rag.classify(n["content"], bd)
-        mp = mood.plan(n["content"], bd)
-        # 偶尔就是一句「？」，这种条目不值得调模型，也更像真人
-        early = human.reaction(scene, rng=ctx.rng("react"))
-        if early:
-            return st, bd, human.plan("comment", bd, scene, ctx.rng("shape")), "", "", False, early
-        # 长度按真实分布抽：这一条可能只有 5 个字，也可能 40 个字，跟真人一样有方差
-        pl = human.plan("comment", bd, scene, ctx.rng("shape"))
-        # 强情感帖才给超长档。语料里情绪帖下 60% 的评论超过 100 字，
-        # 而全站只有 2.9%——长评论是强情感帖的配套，不是普遍现象。
-        lf = longform.plan_comment(n["content"], mp, ctx.rng("long"))
-        if lf:
-            pl = dict(pl, lo=lf["lo"], hi=lf["hi"], newline=True, longform=lf["kind"])
-            length_txt = longform.brief_comment(lf)
-            log.info("[长评] %s %s %s %d-%d字（%s）", ctx.label, n["id"][-6:],
-                     lf["kind"], lf["lo"], lf["hi"], mp["mood"])
-        else:
-            if mp["long"]:
-                # 人家写了三百字，回五个字就是敷衍。长帖强制走长档
-                pl = dict(pl, lo=38, hi=82)
-            length_txt = human.brief(pl)
-        system, user, enabled = ctx.prompt(
-            "comment", post=n["content"][:300], style=st, board=bd,
-            scene=scene, sample=n["content"][:200], post_id=n.get("id"),
-            length=length_txt, hint=human.sticker_hint(pl),
-            long_text=bool(lf),
-        )
-        # 评论也得知道今天几号、下没下雨。不然随口一句「今天还下着雨」，
-        # 或者把现在当成别的月份，本地人一眼看出是假的。
-        if enabled:
-            try:
-                ev = events.brief(ctx.campus, with_notice=False)
-                if ev:
-                    user = (f"{user}\n\n【今天】{ev}。这只是背景，别把日期写进正文；"
-                            "不要自己推月份；今天没下雨就别写雨、伞、淋湿。")
-            except Exception:
-                pass
-        if enabled:
-            # 姿态放最后：前面是知识库和示范，通用约束在上面，这里是最具体的一条。
-            # 长文例外：mood.brief 是「说一句你在」这种短评指令，会跟拆解/分析打架
-            system = (f"{system}\n\n{longform.mood_note(mp)}" if lf
-                      else f"{system}\n\n{mood.brief(mp)}")
-            if prev:
-                body = "\n".join(f"- {x}" for x in prev[:8])
-                system = (
-                    f"{system}\n\n【这帖下面已经有人说过的】\n{body}\n"
-                    "上面这些角度、句式和开头都别再重复：别重复同一条建议，"
-                    "别套同一个句式，也别用同一句话起头。"
-                    "换一个别人没提到的角度，或者只说你自己会怎么做。"
-                )
-        log.info("[姿态] %s %s %s/%s %s", ctx.label, n["id"][-6:], mp["mood"],
+        r = build_comment_prompt(ctx, n.get("content") or "", bd, prev, n.get("id") or "")
+        mp = r["mood"]
+        if r["longform"]:
+            log.info("[长评] %s %s %s %d-%d字（%s）", ctx.label, (n.get("id") or "")[-6:],
+                     r["longform"]["kind"], r["plan"]["lo"], r["plan"]["hi"], mp["mood"])
+        log.info("[姿态] %s %s %s/%s %s", ctx.label, (n.get("id") or "")[-6:], mp["mood"],
                  mp["gender"], "长帖" if mp["long"] else "")
-        return st, bd, pl, system, user, enabled, None
+        return (r["style"], r["board"], r["plan"], r["system"], r["user"],
+                r["enabled"], r["early"])
 
     with ThreadPoolExecutor(max_workers=min(4, len(chosen))) as ex:
         built = list(ex.map(_build, list(enumerate(chosen))))
@@ -1003,6 +1052,8 @@ def random_comment(ctx: Ctx, max_n: int = 1) -> tuple[bool, str]:
     redo: list[tuple[int, str]] = []
     for i, (t, pl) in enumerate(zip(texts, plans)):
         cand = _clean_content(t or "", lo=2, hi=max(60, pl["hi"] * 2))
+        if cand:
+            cand = ensure_sticker(cand, pl, plans[i].get("scene") or "")
         bad, why = human.needs_rewrite(cand or "")
         if not bad and cand:
             bad, why = campus_violation(cand, ctx.campus)

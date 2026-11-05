@@ -230,7 +230,9 @@ def brief(pl: dict) -> str:
     if pl.get("kind") == "post":
         form = pl.get("form") or "one"
         txt = next((f[4] for f in FORMS if f[0] == form), "")
-        return (f"【形态】{txt}。长度大概 {int(pl['hi']) + 6} 字上下。"
+        # 原来写「hi+6 字上下」，模型会照着上限再加一点，实测中位 38.5，
+        # 而真实帖子中位 30。改成「以内」让它往回收。
+        return (f"【形态】{txt}。长度 {int(pl['hi'])} 字以内。"
                 "先把这句话说完，不要数着字数写、不要断在半句。"
                 "只保留跟这件事有关的事实（时间、地点、人物、结果），没有就不编。")
     lo, hi = pl["lo"], pl["hi"]
@@ -242,18 +244,23 @@ def brief(pl: dict) -> str:
         tone = "正常长度，别铺陈"
     else:
         tone = "可以多说两句，但别写成小作文"
-    return f"【这次必须写 {lo}-{hi} 字】{tone}，不要超出这个长度太多。"
+    # 「必须写 X-Y 字」会让模型写满上限，实测中位被顶到 29 字，而真人中位只有 14。
+    # 改成「最多 hi 字」+ 说清就停，让它往短里收。
+    return f"【这次最多写 {hi} 字】{tone}，说清就停，不要凑长度、不要补第二句。"
 
 
 def sticker_hint(pl: dict) -> str:
     """表情提示要放在 user 里、并且比长度弱：放 system 末尾时模型会 60% 都加表情。
 
     只给白名单让它自己按语境挑——指定 [生气] 的话，它会在「太对了」后面也贴上。
+
+    措辞从「可以带一个…不合适就不加」改成「加一个」：前者被模型当成可选项，
+    实测只有 8% 真加了，而语料里是 26.7%。抽中 sticker=True 就是要加。
     """
     if not pl.get("sticker"):
         return ""
-    return ("（结尾合适的话可以带一个表情，只能用这些："
-            + "".join(f"[{x}]" for x in STICKERS) + "；不合适就不加）")
+    return ("（结尾必须带一个表情，只能用这些："
+            + "".join(f"[{x}]" for x in STICKERS) + "，挑一个跟语气最贴的）")
 
 
 NEG_SCENES = {"情绪低落", "人际孤独", "家庭矛盾", "考试受挫", "学业焦虑", "身体不适",
@@ -451,13 +458,33 @@ def shape(text: str, pl: dict | None = None) -> str:
 REACTIONS: tuple[str, ...] = ("？", "啊？", "啥？", "？？？", "这啥啊", "离谱", "真的假的", "没看懂")
 
 
-def reaction(scene: str | None, rate: float = 0.05, rng: random.Random | None = None) -> str | None:
+def reaction(scene: str | None, text: str = "", board: str = "",
+             rate: float = 0.14, rng: random.Random | None = None) -> str | None:
+    """偶尔就回一两个字，不调模型。
+
+    真实语料里 ≤5 字的评论占 19.1%，≤8 字占 31.2%——「蹲」「顶」「同问」「？」
+    这些不带任何信息的回复，正是论坛的常态。原来只在「被冒犯」场景 5% 触发，
+    等于没做，结果每条评论都在「言之有物」，这本身就是破绽：
+    读起来人人都在认真给建议，不是论坛，是客服。
+
+    按帖子和板块分流，避免满屏都是「蹲」：
+    失物招领用「顶」，二手用「dd」，求助用「蹲/同问」。
+    """
     rng = rng or random.Random()
-    if scene != "被冒犯":
-        return None
     if rng.random() >= rate:
         return None
-    return rng.choice(REACTIONS)
+    b, t = (board or ""), (text or "")
+    if "失物" in b:
+        pool = ("顶", "dd", "up", "帮顶", "顶顶顶")
+    elif "二手" in b or "拼" in b:
+        pool = ("dd", "顶", "还在吗", "多少钱")
+    elif any(w in t for w in ("吗", "？", "?", "求", "怎么", "谁知道", "有人知道", "推荐", "哪个好")):
+        pool = ("蹲", "蹲一个", "同问", "蹲蹲", "有了踢我", "我也想知道")
+    elif scene == "被冒犯":
+        pool = ("？", "啊？", "离谱", "真的假的", "这啥啊")
+    else:
+        pool = ("？", "同问", "顶", "啊这", "好家伙")
+    return rng.choice(pool)
 
 
 # 所有号共用一份「最近说过的话」。三个号各自防复读不够——同一批帖子被两个号
