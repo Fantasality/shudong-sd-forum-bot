@@ -118,8 +118,12 @@ def verify(text: str, campus: str) -> list[str]:
     return out
 
 
-def brief(campus: str, area: str | None = None, max_canteens: int = 5) -> str:
-    """给 prompt 用的一小段事实：本校区食堂名 + 两三个招牌 + 地标。"""
+def brief(campus: str, area: str | None = None, max_canteens: int = 9) -> str:
+    """给 prompt 用的一小段事实：本校区全部食堂名 + 招牌菜 + 地标。
+
+    食堂名要给全。原来只给前 5 个（天赐庄有 9 个），模型遇到没给到的就自己编，
+    生成过「五食堂」这种清单里不存在的名字——而本校人一眼就知道没有这个食堂。
+    """
     rows = canteens(campus)
     if not rows:
         return ""
@@ -131,7 +135,7 @@ def brief(campus: str, area: str | None = None, max_canteens: int = 5) -> str:
     for c in picked[:max_canteens]:
         names.append(c["name"].replace("食堂", ""))
     sig = []
-    for c in picked[:3]:
+    for c in picked[:5]:
         for item in re.split(r"[、，]", c.get("signature") or ""):
             item = item.strip()
             if item and item not in sig:
@@ -141,7 +145,7 @@ def brief(campus: str, area: str | None = None, max_canteens: int = 5) -> str:
     if sig:
         out += f"常见菜：{'、'.join(sig[:6])}。"
     if marks:
-        out += f"地标：{'、'.join(marks[:5])}。"
+        out += f"地标：{'、'.join(marks[:8])}。"
     return out
 
 

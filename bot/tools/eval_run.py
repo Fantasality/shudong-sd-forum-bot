@@ -134,6 +134,24 @@ def make_ctx(cfg: dict, acc: dict, b: brain_mod.Brain):
                          cfg=cfg2, manual=True)
 
 
+_FACT = {"bad": 0, "total": 0, "issues": []}
+
+
+def _fact_check(txt: str, campus: str) -> None:
+    """记一笔事实校验：食堂/地标是否属于这个校区、名字在不在真实清单里。"""
+    if not txt:
+        return
+    _FACT["total"] += 1
+    try:
+        v = tasks_mod.facts.verify(txt, campus or "")
+    except Exception:
+        return
+    if v:
+        _FACT["bad"] += 1
+        if len(_FACT["issues"]) < 8:
+            _FACT["issues"].append((txt[:44], v))
+
+
 def gen_comment(ctx, post: str, board: str, prev: list[str]) -> str | None:
     r = tasks_mod.build_comment_prompt(ctx, post, board, prev, "")
     if r["early"]:                      # 固定反应（「？」这种），不调模型
@@ -156,6 +174,7 @@ def gen_comment(ctx, post: str, board: str, prev: list[str]) -> str | None:
             tasks_mod.human.remember(txt, getattr(ctx, "account", ""))
         except Exception:
             pass
+        _fact_check(txt, getattr(ctx, "campus", "") or "")
     return txt
 
 
@@ -373,6 +392,9 @@ def run_comment(cfg: dict, cases: list[dict], b, n: int, rng) -> dict:
         "dist": round(dist, 1), "dist_detail": ddet,
         "dup": round(dup_s, 1), "dup_detail": dupdet,
         "flavor": round(flav, 1), "flavor_hits": flavor_hits,
+        "fact_total": _FACT["total"], "fact_bad": _FACT["bad"],
+        "fact_rate": round(1 - _FACT["bad"] / max(1, _FACT["total"]), 3),
+        "fact_issues": _FACT["issues"],
         "samples": texts[:12],
     }
 
@@ -571,6 +593,10 @@ def main() -> None:
             for k, v in r["topic_detail"].items():
                 print(f"      {k:14s} 真实{v[0]:5.1f}% 生成{v[1]:5.1f}% 差{v[2]:5.1f}")
             print(f"  形式 {r['form']}/20  {r['form_detail']}")
+        if "fact_rate" in r:
+            print(f"  事实 {r['fact_rate']*100:.0f}% 准确（{r['fact_total']-r['fact_bad']}/{r['fact_total']}）")
+            for t, v in (r.get("fact_issues") or [])[:3]:
+                print(f"      ⚠ {t}  ->  {v}")
         print(f"  AI味 {r['flavor']}/15")
         if r["flavor_hits"]:
             for h in r["flavor_hits"][:4]:

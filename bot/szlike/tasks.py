@@ -982,7 +982,8 @@ def build_comment_prompt(ctx: Ctx, post_text: str, board: str,
         # 踩坑合集里记着，第二人称禁令在 LLM 上效果差，第一人称信念才管用。
         system = (f"{system}\n\n我说话向来一句就完，不铺垫、不复述对方的话、不总结，"
                   "也不给人做方案。要提就提他说的那个具体东西——哪门课、"
-                  "哪个窗口、多少钱、哪栋楼，其余一概不展开。")
+                  "哪个窗口、多少钱、哪栋楼，其余一概不展开。"
+                  "一条帖子我通常只接一个点，想到别的就憋着，不面面俱到。")
     return {"style": st, "board": board, "plan": pl, "system": system, "user": user,
             "enabled": enabled, "early": None, "mood": mp, "longform": lf,
             "scene": scene}
