@@ -458,37 +458,58 @@ def shape(text: str, pl: dict | None = None) -> str:
 REACTIONS: tuple[str, ...] = ("？", "啊？", "啥？", "？？？", "这啥啊", "离谱", "真的假的", "没看懂")
 
 
+def _short_pool() -> dict:
+    """真实语料里 ≤10 字的回复，按用途分好类。第一次读时缓存。"""
+    global _SHORT_CACHE
+    if _SHORT_CACHE is None:
+        try:
+            _SHORT_CACHE = json.loads(
+                (ROOT / "kb" / "short_replies.json").read_text(encoding="utf-8"))
+        except Exception:
+            _SHORT_CACHE = {}
+    return _SHORT_CACHE
+
+
+_SHORT_CACHE: dict | None = None
+
+
 def reaction(scene: str | None, text: str = "", board: str = "",
-             rate: float = 0.14, rng: random.Random | None = None) -> str | None:
+             rate: float = 0.15, rng: random.Random | None = None,
+             recent: list[str] | tuple[str, ...] | None = None) -> str | None:
     """偶尔就回一两个字，不调模型。
 
-    真实语料里 ≤5 字的评论占 19.1%，≤8 字占 31.2%——「蹲」「顶」「同问」「？」
-    这些不带任何信息的回复，正是论坛的常态。原来只在「被冒犯」场景 5% 触发，
-    等于没做，结果每条评论都在「言之有物」，这本身就是破绽：
-    读起来人人都在认真给建议，不是论坛，是客服。
+    真实语料里 ≤5 字的评论占 19.1%，「蹲」「顶」「同问」「？」这些不带信息的回复
+    正是论坛常态。原来只在「被冒犯」场景 5% 触发，等于没做，结果每条评论都在
+    言之有物——那不是论坛，是客服。
 
-    按帖子和板块分流，避免满屏都是「蹲」：
-    失物招领用「顶」，二手用「dd」，求助用「蹲/同问」。
+    候选不是手写的几个词，而是从 kb/raw.db 里扫出来的 5660 条真实短句：
+    手写五六个词的话，同一批 188 条里「蹲」会冒出来好几次，开头重复率 0.15，
+    而真人基数是 0.012，反而更假。
     """
     rng = rng or random.Random()
     if rng.random() >= rate:
         return None
     b, t = (board or ""), (text or "")
     if "失物" in b:
-        pool = ("顶", "dd", "up", "帮顶", "顶顶顶")
+        cat = "lost"
     elif "二手" in b or "拼" in b:
-        pool = ("dd", "顶", "还在吗", "多少钱")
+        cat = "trade"
     elif any(w in t for w in ("吗", "？", "?", "求", "怎么", "谁知道", "有人知道", "推荐", "哪个好")):
-        pool = ("蹲", "蹲一个", "同问", "蹲蹲", "有了踢我", "我也想知道")
+        cat = "ask"
     elif scene == "被冒犯":
-        pool = ("？", "啊？", "离谱", "真的假的", "这啥啊")
+        cat = "react"
     else:
-        pool = ("？", "同问", "顶", "啊这", "好家伙")
-    return rng.choice(pool)
+        cat = "plain"
+    pool = _short_pool().get(cat) or []
+    if not pool:
+        return None
+    seen = set(recent or ())
+    cands = [x for x in pool if x["t"] not in seen]
+    if not cands:
+        cands = pool
+    return rng.choice(cands)["t"]
 
 
-# 所有号共用一份「最近说过的话」。三个号各自防复读不够——同一批帖子被两个号
-# 各回一句「蹲蹲」，比一个号复读更容易被看出来。
 SHARED = ROOT / "logs" / "recent_shared.jsonl"
 
 

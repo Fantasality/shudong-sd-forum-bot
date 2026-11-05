@@ -51,8 +51,11 @@ DEFAULT_PROMPTS: dict[str, dict] = {
     },
     "reply": {
         "system": "你在大学社区回复别人给你的评论。用一句自然、有温度的话回应，"
-        "不要客套开头，不要说教，不要暴露自己是 AI。只输出回复本身。",
-        "user": "帖子：{post}\n对方说：{their}",
+        "不要客套开头，不要说教，不要暴露自己是 AI。只输出回复本身。"
+        "楼里已经说过的话别再重复，也别问对方刚说过的信息。"
+        "必须接住对方这句话里的具体东西——他说的是哪门课、哪个窗口、多少钱、"
+        "哪栋楼，你的回复要沾到其中至少一个，不能泛泛地说「确实」「懂了」。",
+        "user": "【原帖】{post}\n\n【对方说】{their}{thread}",
     },
     "comment": {
         "system": "你是苏州大学的学生，正在浏览校园社区。写一句真实、轻松、像真人随口说的话。"
@@ -135,8 +138,8 @@ class Ctx:
                 # 短内容：语料里只有 9.2% 的帖子出现句号，模型几乎每句都收句号，
                 # 是一眼能看出来的机器味。但也不能全禁——仍有 8% 的评论带句号，
                 # 一刀切会让「句号率」这个指标直接归零，同样是破绽。
-                system = (f"{system}\n\n断句用逗号或者直接换行，别每句都收句号；"
-                          "只有一句话特别长、不加句号会读串的时候才用。")
+                system = (f"{system}\n\n断句以逗号或换行为主，别每句都收句号。"
+                          "一整段话只在最后收一个句号，中间不要断成好几句。")
             if self.profile:
                 # 稳定身份，不主动说出来，只影响「会注意到什么」
                 system = (f"你的固定身份（别自我介绍，也别提这些设定）：{self.profile}\n\n"
@@ -649,6 +652,7 @@ def reply_comments(ctx: Ctx, max_n: int = 3) -> tuple[bool, str]:
                 "reply_to": None,
                 "their": n.get("content", ""),
                 "post": (n.get("post") or {}).get("content", ""),
+                "thread": "",
             }
         )
 
@@ -666,7 +670,11 @@ def reply_comments(ctx: Ctx, max_n: int = 3) -> tuple[bool, str]:
                 "comment_id": cid,
                 "reply_to": n["id"],
                 "their": n.get("content", ""),
-                "post": (n.get("comment") or {}).get("content", ""),
+                # 这里原来填的是 comment.content（原评论），不是帖子正文——
+                # 结果模型以为「帖子」就是那句评论，答得牛头不对马嘴。
+                # 真正的帖子全文和楼里已有的回复，在 _build_reply 里按 comment_id 拉。
+                "post": "",
+                "thread": "",
             }
         )
 
@@ -678,21 +686,31 @@ def reply_comments(ctx: Ctx, max_n: int = 3) -> tuple[bool, str]:
     jobs, plans = [], []
 
     def _build_reply(t):
-        scene = rag.classify(t["their"], None)
-        # 回复是「接着对方那句话往下说」，情绪要从对方这句话里读，
-        # 所以姿态用 their 判，不用原帖——对方可能是在自嘲，原帖却是崩溃稿
-        mp = mood.plan(t["their"], None)
-        pl = human.plan("comment", None, scene, ctx.rng("shape"))
-        if mp["long"]:
-            pl = dict(pl, lo=30, hi=70)
-        system, user, enabled = ctx.prompt(
-            "reply", post=t["post"][:200], their=t["their"][:200], style="",
-            scene=scene, sample=t["their"][:160], length=human.brief(pl),
-            hint=human.sticker_hint(pl),
-        )
-        if enabled:
-            system = f"{system}\n\n{mood.brief(mp)}"
-        return pl, system, user, enabled
+        # 楼中楼：先把完整上下文拉齐——原帖全文 + 这条评论 + 楼里已经聊到哪一步。
+        # 不给这些，模型只能对着一句话猜，答非所问是必然的。
+        post_txt = t.get("post") or ""
+        thread_txt = ""
+        if t["kind"] == "subcomment":
+            try:
+                cd = ops.comment_context(ctx.client, t["comment_id"])
+                post_txt = ((cd.get("post") or {}).get("content") or post_txt)
+                lines = []
+                for e2 in ((cd.get("subcomments") or {}).get("edges") or []):
+                    sn = e2.get("node") or {}
+                    if sn.get("id") == t["reply_to"]:
+                        continue        # 这句就是要回的那条，单独放在【对方说】
+                    txt = (sn.get("content") or "").strip()
+                    if txt:
+                        lines.append(f"- {txt[:80]}")
+                if lines:
+                    thread_txt = "\n\n【楼里已经说过的】\n" + "\n".join(lines[-8:]) + \
+                                 "\n别再重复上面的意思，也别问他们说过的信息。"
+            except Exception as e:
+                log.debug("拉评论上下文失败 %s: %s", (t.get("comment_id") or "")[-6:], e)
+
+        r = build_reply_prompt(ctx, post_txt, t["their"], thread_txt,
+                               t.get("comment_id") or "")
+        return r["plan"], r["system"], r["user"], r["enabled"]
 
     with ThreadPoolExecutor(max_workers=min(3, len(tasks))) as ex:
         built = list(ex.map(_build_reply, tasks))
@@ -860,8 +878,12 @@ def build_comment_prompt(ctx: Ctx, post_text: str, board: str,
     scene = rag.classify(post_text, board)
     mp = mood.plan(post_text, board)
     pl = human.plan("comment", board, scene, ctx.rng("shape"))
+    # 评论长度再压一档：真实中位 14 字，模型总往上限写，实测 20.5。
+    # 短评本来就该短，长一截是最容易被读出来的地方。
+    pl = dict(pl, hi=max(5, int(pl["hi"] * 0.8)))
     # 偶尔就是一句「蹲」「顶」「？」，这种条目不值得调模型，也更像真人
-    early = human.reaction(scene, post_text, board, rng=ctx.rng("react"))
+    early = human.reaction(scene, post_text, board, rng=ctx.rng("react"),
+                           recent=human.shared_recent(60))
     if early:
         return {"style": st, "board": board, "plan": pl, "system": "", "user": "",
                 "enabled": False, "early": early, "mood": mp, "longform": None,
@@ -913,10 +935,40 @@ def build_comment_prompt(ctx: Ctx, post_text: str, board: str,
         system = (f"{system}\n\n不要分析利弊、不要罗列理由、不要用「先…再…」"
                   "「建议你」「先想清楚」这类句式，不要给完整方案。"
                   "不要用「确实」「其实」「总的来说」「不得不说」这些垫词。"
+                  "要沾到帖子里说的具体东西——哪门课、哪个窗口、多少钱、哪栋楼，"
+                  "不能泛泛地说「有道理」「懂了」。"
                   "像在群里顺口接一句，说完就停。")
     return {"style": st, "board": board, "plan": pl, "system": system, "user": user,
             "enabled": enabled, "early": None, "mood": mp, "longform": lf,
             "scene": scene}
+
+
+def build_reply_prompt(ctx: Ctx, post: str, their: str, thread: str = "",
+                       comment_id: str = "") -> dict:
+    """构建一条楼中楼回复要发给模型的东西。
+
+    thread 是这条评论下面已经聊过的内容。没有它，模型只能对着一句话猜，
+    人问「那家店还开吗」，它回「确实挺好吃的」。
+    """
+    scene = rag.classify(their, None)
+    # 回复是「接着对方那句话往下说」，情绪要从对方这句话里读，
+    # 所以姿态用 their 判，不用原帖——对方可能是在自嘲，原帖却是崩溃稿
+    mp = mood.plan(their, None)
+    pl = human.plan("comment", None, scene, ctx.rng("shape"))
+    # 楼中楼比一级评论还短：真实中位 13 字、≤6 字占 18%。
+    # 直接用 comment 的长度档会生成 22 字，比真人长七成。
+    pl = dict(pl, hi=max(8, int(pl["hi"] * 0.7)))
+    if mp["long"]:
+        pl = dict(pl, lo=30, hi=70)
+    system, user, enabled = ctx.prompt(
+        "reply", post=post[:600], their=their[:200], thread=thread,
+        style="", scene=scene, sample=their[:160], length=human.brief(pl),
+        hint=human.sticker_hint(pl),
+    )
+    if enabled:
+        system = f"{system}\n\n{mood.brief(mp)}"
+    return {"plan": pl, "system": system, "user": user, "enabled": enabled,
+            "scene": scene, "mood": mp}
 
 
 def random_comment(ctx: Ctx, max_n: int = 1) -> tuple[bool, str]:

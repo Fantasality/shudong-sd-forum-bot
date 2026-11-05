@@ -148,6 +148,12 @@ def gen_comment(ctx, post: str, board: str, prev: list[str]) -> str | None:
     txt = tasks_mod._clean_content(raw or "", lo=2, hi=max(60, r["plan"]["hi"] * 2))
     if txt:
         txt = tasks_mod.ensure_sticker(txt, r["plan"], r.get("scene") or "")
+        # 线上发布后会 human.remember()，短回复池靠它去重。评估不写这条记录的话，
+        # 同一批里会冒出好几个「蹲」，开头重复率 0.11，而真人基数是 0.012。
+        try:
+            tasks_mod.human.remember(txt, getattr(ctx, "account", ""))
+        except Exception:
+            pass
     return txt
 
 
@@ -432,9 +438,85 @@ def run_post(cfg: dict, b, n: int, rng) -> dict:
     }
 
 
+def run_reply(cfg: dict, b, n: int, rng) -> dict:
+    """楼中楼回复评估。样本从 eval_replies.py 抓的真实楼中楼来。"""
+    rpath = HERE / "replyset.json"
+    if not rpath.exists():
+        return {"mode": "reply", "total": 0, "err": "缺 replyset.json，先跑 eval_replies.py"}
+    cases = json.loads(rpath.read_text(encoding="utf-8"))["cases"][:n or 999]
+
+    accs = [(k, v) for k, v in (cfg.get("accounts") or {}).items()
+            if (v or {}).get("enabled")] or [("eval", {"name": "eval", "persona": "warm"})]
+    rng.shuffle(accs)
+
+    jobs = []
+    for i, c in enumerate(cases):
+        name, acc = accs[i % len(accs)]
+        ctx = make_ctx(cfg, dict(acc, name=name), b)
+        jobs.append((c, ctx))
+
+    def work(j):
+        c, ctx = j
+        thread = "\n".join(f"- {x}" for x in c.get("thread") or [])
+        thread_txt = (f"\n\n【楼里已经说过的】\n{thread}" if thread else "")
+        r = tasks_mod.build_reply_prompt(ctx, c["post"], c["their"], thread_txt,
+                                         c.get("comment_id") or "")
+        if not r["enabled"]:
+            return None
+        try:
+            raw = ctx.brain.chat(r["system"], r["user"],
+                                 max_tokens=max(20, min(160, int(r["plan"]["hi"] * 2))))
+        except Exception:
+            return None
+        txt = tasks_mod._clean_content(raw or "", lo=2, hi=max(40, r["plan"]["hi"] * 2))
+        if txt:
+            txt = tasks_mod.ensure_sticker(txt, r["plan"], r.get("scene") or "")
+        return txt
+
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        gens = list(ex.map(work, jobs))
+    pairs = [(c, g) for (c, _), g in zip(jobs, gens) if g]
+    texts = [g for _, g in pairs]
+    print(f"  生成 {len(texts)}/{len(cases)} 条楼中楼，用时 {time.time()-t0:.0f}s")
+    if not texts:
+        return {"mode": "reply", "total": 0, "err": "生成全失败"}
+
+    def _judge_twice(cg):
+        c, fake = cg
+        pool = [x for x in (c.get("real_replies") or []) if x.strip() and x.strip() != fake]
+        if len(pool) < 3:
+            pool = (c.get("real_replies") or [])[:4]
+        return [turing_case(b, c["post"], pool, fake, random.Random(hash((fake, k)) & 0xffff))
+                for k in range(2)]
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        verdicts = list(ex.map(_judge_twice, pairs))
+    caught_n = sum(sum(v) for v in verdicts)
+    total_n = sum(len(v) for v in verdicts)
+    catch_rate = caught_n / max(1, total_n)
+    turing = _pct(1 - catch_rate) * 40
+    print(f"  图灵：{caught_n}/{total_n} 次被判（{catch_rate*100:.0f}%）")
+
+    ref = [x for c in cases for x in (c.get("real_replies") or [])]
+    ds, ddet = dist_score(texts, ref)
+    dup, dupdet = dup_score(texts)
+    clean, hits = ai_flavor(texts)
+
+    total = turing + ds * 25 + dup * 20 + clean * 15
+    return {
+        "mode": "reply", "n": len(texts), "total": round(total, 1),
+        "turing": round(turing, 1), "catch_rate": round(catch_rate, 3),
+        "dist": round(ds * 25, 1), "dist_detail": ddet,
+        "dup": round(dup * 20, 1), "dup_detail": dupdet,
+        "flavor": round(clean * 15, 1), "flavor_hits": hits,
+        "samples": texts[:12],
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["comment", "post", "both"], default="both")
+    ap.add_argument("--mode", choices=["comment", "post", "reply", "both", "all"], default="all")
     ap.add_argument("--n", type=int, default=0, help="样本数，0=用测试集全部")
     args = ap.parse_args()
 
@@ -445,21 +527,25 @@ def main() -> None:
     rng = random.Random(20261105)
 
     results = {}
-    if args.mode in ("comment", "both"):
+    if args.mode in ("comment", "both", "all"):
         n = args.n or len(cases)
         print(f"\n===== 评论评估（{n} 条）=====")
         results["comment"] = run_comment(cfg, cases, b, n, rng)
-    if args.mode in ("post", "both"):
+    if args.mode in ("post", "both", "all"):
         # 40 条在一轮之间还能差 5 分，全是抽签。60 条才稳。
         n = args.n or 60
         print(f"\n===== 帖子评估（{n} 条）=====")
         results["post"] = run_post(cfg, b, n, rng)
+    if args.mode in ("reply", "all"):
+        n = args.n or 40
+        print(f"\n===== 楼中楼评估（{n} 条）=====")
+        results["reply"] = run_reply(cfg, b, n, rng)
 
     print("\n" + "=" * 56)
     for mode, r in results.items():
         print(f"\n【{mode}】总分 {r['total']}/100")
         print(f"  图灵 {r['turing']}/40（被抓 {r['catch_rate']*100:.0f}%）")
-        if mode == "comment":
+        if mode in ("comment", "reply"):
             print(f"  分布 {r['dist']}/25  {r['dist_detail']}")
             print(f"  同质 {r['dup']}/20  {r['dup_detail']}")
         else:

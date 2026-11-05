@@ -85,6 +85,26 @@ query Q($afterComment: String, $afterSubcomment: String) {
 }
 """
 
+# 楼中楼回复必须看到「整条帖 + 原评论 + 楼里已经聊到哪一步」。
+# 只给一句 comment.content 的话，模型会答非所问：人问「那家店还开吗」，
+# 它回「确实挺好吃的」——因为看不到上一条是谁在问什么。
+Q_COMMENT_CONTEXT = """
+query Q($id: ID!) {
+  comment(id:$id) {
+    id content createdAt
+    creator { id profile { nickname } }
+    post { id content }
+    subcomments(first:20) {
+      edges { node {
+        id content createdAt
+        replyTo { id }
+        creator { id profile { nickname } }
+      } }
+    }
+  }
+}
+"""
+
 Q_MY_POSTS = """
 query Q($id: ID!, $after: String) { user(userId:$id) {
   userPosts(first:10, after:$after, type:CREATED) {
@@ -238,6 +258,16 @@ def list_comments(
 
 def latest_replies(client: Client) -> dict:
     return client.gql(Q_LATEST_REPLIES, operation="Q")["viewer"]["user"]
+
+
+def comment_context(client: Client, comment_id: str) -> dict:
+    """一条评论的完整上下文：原帖全文 + 这条评论 + 楼里已有的回复。
+
+    楼中楼回复最容易翻车的地方是答非所问。原来只把 comment.content 塞进
+    prompt，模型看不到原帖在讲什么，也不知道楼上已经说过什么，
+    于是人问「那家店还开吗」，它回「确实挺好吃的」。
+    """
+    return (client.gql(Q_COMMENT_CONTEXT, {"id": comment_id}, "Q") or {}).get("comment") or {}
 
 
 def my_posts(client: Client, user_id: str, after: str | None = None) -> dict:
