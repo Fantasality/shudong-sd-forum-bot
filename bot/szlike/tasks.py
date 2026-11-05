@@ -235,6 +235,55 @@ def campus_violation(text: str, campus: str) -> tuple[bool, str]:
     return False, ""
 
 
+def trim_periods(text: str) -> str:
+    """把中间的句号换成逗号。
+
+    真实语料里 >25 字的评论只有 23% 带句号，而模型写出来是 44%——它习惯每句都收。
+    提示词改了两轮都不稳（「别每句都收」→ 32%，「超过 30 字必须用」→ 42%），
+    干脆在生成后确定性地改：只在整段末尾留一个句号。
+    """
+    t = (text or "").strip()
+    if len(t) < 16 or t.count("。") <= 1:
+        return t
+    parts = [p.strip() for p in t.split("。")]
+    parts = [p for p in parts if p]
+    if len(parts) <= 1:
+        return t
+    head, tail = "，".join(parts[:-1]), parts[-1]
+    return f"{head}。{tail}" if len(tail) > 3 else f"{head}。"
+
+
+# 开头垫词。真人回帖直接说事，不先认同一句。
+# 只收「删掉之后句子照样通顺」的，边界带半角逗号防咬边。
+_HEDGE_HEAD = re.compile(
+    r"^(?:确实|其实|说实话|说真的|老实说|不得不说|总的来说|其实吧|"
+    r"个人觉得|我觉得吧)[，,\s]*")
+# 结尾升华/客服腔。真人帖子结尾是「就这」「蹲一个」「？」，几乎不总结。
+_HEDGE_TAIL = re.compile(
+    r"(?:希望对你有(?:所)?帮助|希望(?:能|对你)?(?:有|帮到)|加油哦|祝你好运|"
+    r"以上|共勉|你觉得呢|你们怎么看)[！!。.？?]*$")
+
+
+def erase_hedges(text: str) -> str:
+    """擦掉开头的垫词和结尾的升华。
+
+    为什么要做成后处理而不是写进 prompt：踩坑合集里记着一条——人格规则里
+    列举禁词会触发「别想大象」效应，模型反而把你列的词原样复读。
+    实测也是这样：写了「不要用确实/其实」之后，每批里都会冒出好几个「确实」。
+    禁词只能靠物理删除。
+
+    只动开头和结尾，中间一律不碰：误伤比漏抓更伤。
+    """
+    t = (text or "").strip()
+    t2 = _HEDGE_HEAD.sub("", t)
+    if len(t2) >= 4:            # 删完还剩东西才用，避免把整句吃掉
+        t = t2
+    t3 = _HEDGE_TAIL.sub("", t)
+    if len(t3) >= 4:
+        t = t3
+    return t.strip("，,。.、 ")
+
+
 def ensure_sticker(text: str, pl: dict, scene: str = "") -> str:
     """该带表情的条目，模型没带就补一个。
 
@@ -929,15 +978,11 @@ def build_comment_prompt(ctx: Ctx, post_text: str, board: str,
                 "别套同一个句式，也别用同一句话起头。"
                 "换一个别人没提到的角度，或者只说你自己会怎么做。"
             )
-        # 评论最容易露馅的地方，是把一句随口接话写成小建议。
-        # 「好处是…坏处是…」「先想清楚再行动」这种结构，真人在回帖里不写。
-        # 「确实」「其实」这类填充词也是：真人回帖直接说事，不先垫一句认同。
-        system = (f"{system}\n\n不要分析利弊、不要罗列理由、不要用「先…再…」"
-                  "「建议你」「先想清楚」这类句式，不要给完整方案。"
-                  "不要用「确实」「其实」「总的来说」「不得不说」这些垫词。"
-                  "要沾到帖子里说的具体东西——哪门课、哪个窗口、多少钱、哪栋楼，"
-                  "不能泛泛地说「有道理」「懂了」。"
-                  "像在群里顺口接一句，说完就停。")
+        # 「人格针」写法：把「不许」翻译成「我不是那样的人」。
+        # 踩坑合集里记着，第二人称禁令在 LLM 上效果差，第一人称信念才管用。
+        system = (f"{system}\n\n我说话向来一句就完，不铺垫、不复述对方的话、不总结，"
+                  "也不给人做方案。要提就提他说的那个具体东西——哪门课、"
+                  "哪个窗口、多少钱、哪栋楼，其余一概不展开。")
     return {"style": st, "board": board, "plan": pl, "system": system, "user": user,
             "enabled": enabled, "early": None, "mood": mp, "longform": lf,
             "scene": scene}
@@ -1105,6 +1150,8 @@ def random_comment(ctx: Ctx, max_n: int = 1) -> tuple[bool, str]:
     for i, (t, pl) in enumerate(zip(texts, plans)):
         cand = _clean_content(t or "", lo=2, hi=max(60, pl["hi"] * 2))
         if cand:
+            cand = erase_hedges(cand)
+            cand = trim_periods(cand)
             cand = ensure_sticker(cand, pl, plans[i].get("scene") or "")
         bad, why = human.needs_rewrite(cand or "")
         if not bad and cand:

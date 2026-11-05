@@ -474,7 +474,7 @@ _SHORT_CACHE: dict | None = None
 
 
 def reaction(scene: str | None, text: str = "", board: str = "",
-             rate: float = 0.15, rng: random.Random | None = None,
+             rate: float = 0.25, rng: random.Random | None = None,
              recent: list[str] | tuple[str, ...] | None = None) -> str | None:
     """偶尔就回一两个字，不调模型。
 

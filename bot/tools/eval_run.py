@@ -110,7 +110,7 @@ def turing_case(b: brain_mod.Brain, post: str, real: list[str],
     rng.shuffle(pool)
     picks = pool[:4]
     if len(picks) < 3:
-        return False
+        return None          # 参照不足，这个样本无效，统计时要剔除
     items = picks + [fake]
     rng.shuffle(items)
     fake_idx = items.index(fake) + 1
@@ -147,6 +147,8 @@ def gen_comment(ctx, post: str, board: str, prev: list[str]) -> str | None:
         return None
     txt = tasks_mod._clean_content(raw or "", lo=2, hi=max(60, r["plan"]["hi"] * 2))
     if txt:
+        txt = tasks_mod.erase_hedges(txt)
+        txt = tasks_mod.trim_periods(txt)
         txt = tasks_mod.ensure_sticker(txt, r["plan"], r.get("scene") or "")
         # 线上发布后会 human.remember()，短回复池靠它去重。评估不写这条记录的话，
         # 同一批里会冒出好几个「蹲」，开头重复率 0.11，而真人基数是 0.012。
@@ -342,8 +344,9 @@ def run_comment(cfg: dict, cases: list[dict], b, n: int, rng) -> dict:
 
     with ThreadPoolExecutor(max_workers=8) as ex:
         verdicts = list(ex.map(_judge_twice, pairs))
-    caught_n = sum(sum(v) for v in verdicts)
-    total_n = sum(len(v) for v in verdicts)
+    flat = [x for v in verdicts for x in v if x is not None]
+    caught_n = sum(1 for x in flat if x)
+    total_n = len(flat)
     catch_rate = caught_n / max(1, total_n)
     turing = _pct(1 - catch_rate) * 40
     print(f"  图灵：{caught_n}/{total_n} 次被判（{catch_rate*100:.0f}%），用时 {time.time()-t0:.0f}s")
@@ -396,8 +399,9 @@ def run_post(cfg: dict, b, n: int, rng) -> dict:
 
     with ThreadPoolExecutor(max_workers=8) as ex:
         verdicts = list(ex.map(_judge_twice, texts))
-    caught_n = sum(sum(v) for v in verdicts)
-    total_n = sum(len(v) for v in verdicts)
+    flat = [x for v in verdicts for x in v if x is not None]
+    caught_n = sum(1 for x in flat if x)
+    total_n = len(flat)
     catch_rate = caught_n / max(1, total_n)
     turing = _pct(1 - catch_rate) * 40
     print(f"  图灵：{caught_n}/{total_n} 次被判（{catch_rate*100:.0f}%）")
@@ -470,6 +474,8 @@ def run_reply(cfg: dict, b, n: int, rng) -> dict:
             return None
         txt = tasks_mod._clean_content(raw or "", lo=2, hi=max(40, r["plan"]["hi"] * 2))
         if txt:
+            txt = tasks_mod.erase_hedges(txt)
+            txt = tasks_mod.trim_periods(txt)
             txt = tasks_mod.ensure_sticker(txt, r["plan"], r.get("scene") or "")
         return txt
 
@@ -492,8 +498,9 @@ def run_reply(cfg: dict, b, n: int, rng) -> dict:
 
     with ThreadPoolExecutor(max_workers=8) as ex:
         verdicts = list(ex.map(_judge_twice, pairs))
-    caught_n = sum(sum(v) for v in verdicts)
-    total_n = sum(len(v) for v in verdicts)
+    flat = [x for v in verdicts for x in v if x is not None]
+    caught_n = sum(1 for x in flat if x)
+    total_n = len(flat)
     catch_rate = caught_n / max(1, total_n)
     turing = _pct(1 - catch_rate) * 40
     print(f"  图灵：{caught_n}/{total_n} 次被判（{catch_rate*100:.0f}%）")

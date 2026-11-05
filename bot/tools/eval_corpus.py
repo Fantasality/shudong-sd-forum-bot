@@ -28,7 +28,7 @@ OUT = HERE / "testset.json"
 
 # 帖长区间：太短没信息量，太长模型容易跑题
 LO, HI = 15, 180
-MIN_CMT = 3
+MIN_CMT = 5   # 图灵测试要 4 条参照 + 1 条假货，少于此数就把样本算成「没被抓」
 
 
 def load(n: int, seed: int = 20261105) -> dict:
