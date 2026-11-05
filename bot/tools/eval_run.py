@@ -330,6 +330,13 @@ def run_comment(cfg: dict, cases: list[dict], b, n: int, rng) -> dict:
 
     pairs = [(c, g) for (c, _, _), g in zip(jobs, gens) if g]
     texts = [g for _, g in pairs]
+    # 生成失败率过高时直接停：API 余额不足/限流会让「剩下的样本」继续算分，
+    # 算出来的 0% 是假的（实测过：余额耗尽后三轮都显示 0%，全是生成失败）。
+    if len(texts) < len(subset) * 0.7:
+        raise SystemExit(
+            f"生成失败率过高：{len(subset)-len(texts)}/{len(subset)} 条没生成出来。"
+            "最可能是 API 余额不足或限流，评估结果不可信，先修好再跑。")
+
     ref = [x["text"] for c in subset for x in c["real_comments"]]
     print(f"  生成 {len(texts)}/{len(subset)} 条，用时 {gen_time:.0f}s")
 
@@ -388,6 +395,8 @@ def run_post(cfg: dict, b, n: int, rng) -> dict:
         gens = list(ex.map(lambda j: gen_post(j[0], j[1]), jobs))
     texts = [g for g in gens if g]
     print(f"  生成 {len(texts)}/{n} 条帖子，用时 {time.time()-t0:.0f}s")
+    if len(texts) < n * 0.7:
+        raise SystemExit(f"生成失败率过高：{n-len(texts)}/{n} 条没生成出来，先查 API 余额。")
 
     ref_posts = load_ref(BOT, 400)
     t0 = time.time()
@@ -485,6 +494,8 @@ def run_reply(cfg: dict, b, n: int, rng) -> dict:
     pairs = [(c, g) for (c, _), g in zip(jobs, gens) if g]
     texts = [g for _, g in pairs]
     print(f"  生成 {len(texts)}/{len(cases)} 条楼中楼，用时 {time.time()-t0:.0f}s")
+    if len(texts) < len(cases) * 0.7:
+        raise SystemExit(f"生成失败率过高：{len(cases)-len(texts)}/{len(cases)} 条没生成出来，先查 API 余额。")
     if not texts:
         return {"mode": "reply", "total": 0, "err": "生成全失败"}
 
