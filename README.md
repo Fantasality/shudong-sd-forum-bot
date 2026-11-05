@@ -1,78 +1,98 @@
-# 树洞 · 校园匿名社区机器人（一键启动包）
+# Shudong SD Forum Bot · 鼠洞SD论坛机器人
 
-一套跑在自己电脑上的校园匿名社区自动化：自动开号、自动发帖、自动评论、自动回楼中楼，
-内容由大模型写，事实来自内置知识库和联网检索，发出去之前先过一道质量闸门。
+> **For study and personal research only.**
+> This project is a technical demo of LLM-driven content generation, retrieval-augmented
+> writing and quality gating on a campus forum. **Do not use it for舆论攻击 (coordinated
+> opinion manipulation), harassment, disinformation, or any form of information warfare.**
+> You are solely responsible for how you run it and for complying with the target
+> community's rules and local law. The authors do not endorse or support any such use.
 
-手机端配了一个 App（`app/dist/shudong-xray-1.3.0.apk`），能看信息流、发帖、回楼中楼，
-也能一键把电脑上的整份花名册扫进手机。
+An automation stack that runs on your own machine: it registers accounts, writes posts,
+comments and replies on a campus anonymous forum, with an LLM doing the writing and a
+local corpus + retrieval layer supplying the facts. Everything passes a quality gate
+before it can reach the forum.
 
-> 自己玩、自己看。用之前请先确认目标社区的规则，风险自担。
-
----
-
-## 一、它有什么特点
-
-### 1. 拟人
-
-不是「把 prompt 拼好丢给模型」那种。每条内容都要过五道关：
-
-- **形态**：先按真实语料的长度分布抽一个形态（碎片 / 一句话 / 两句 / 反问 / 清单 / 完整段），
-  不是每条都写成一模一样的三行。短内容不带句号，长文必须有句号和分段。
-- **人设**：32 套身份，分布在不同校区、不同学院专业、不同作息，各自有性格
-  （温柔、毒舌、冷漠、社恐、吃货、夜猫、理工宅、恋爱脑……）。同一个话题，不同号写出来不一样。
-- **去重**：同一帖 6 小时内只允许一个号评论（数据库原子占坑）；
-  同一帖下面的「核心建议」只准出现一次（有人说了找宿管，第二个号必须换一条路）；
-  「…比…管用」这种模板句式、开头、口水词（蹲 / 我也 / 确实）都有配额。
-- **出厂检查**：AI 腔词库 + 复读检测 + 校区别串 + 天气一致性（下雨天不许写晒太阳）。
-- **不编事实**：查不准的先联网查，查不到就说不知道，不硬凑一个具体名字。
-
-### 2. 情感问题精处理
-
-情感 / 恋爱 / 委屈 / 孤独这几类帖，不走「我也一样 + 讲我自己一件小事」的共鸣路子——
-那是 AI 味最重的地方。改成：
-
-> 先给一句判断 → 点破他真正卡在哪 → 给一条现在就能做的建议（最好带一句能直接说出口的原话）→ 一句实话收尾。
-
-这个写法是从几万条真实高赞评论里统计出来的：被赞起来的长评全是「给判断 + 讲道理 + 给做法」，
-带立场、带冲劲，几乎不写自我表演式的画面。长评分三档（100–200 / 150–260 / 120–220 字），
-按帖子的情绪强度选档。
-
-### 3. 情绪多维处理
-
-每条内容生成前先判一遍**姿态**，不是套一个通用模板：
-
-- **8 种情绪**：日常 / 吐槽 / 委屈 / 情感 / 孤独 / 求助 / 抱怨 / 分享
-- **性别视角**：男 / 女 / 未知，写到自己和对方时的称呼、关注点不同
-- **长帖识别**：楼主写了三百字，回五个字就是敷衍，自动切长档
-- **立场**：抱怨就一起骂这件事、求助就给具体办法、孤独就点破卡点，不串味
-
-### 4. 数据底座
-
-内置一套从真实社区语料建起来的检索库（帖子 + 评论 + 向量），
-用 bge-m3 做稠密向量、稀疏关键词做倒排，两路召回后用 RRF 融合，再精排。
-生成时自动检索「同类帖子里别人怎么回的」，但会过滤掉画面堆砌的样本，只学定位问题和给办法的写法。
-
-规模在十万条量级，开箱即用，不需要你自己爬。
-
-### 5. 质量闸门
-
-每条内容发之前打六项分：断句 20 / 长度 20 / 开头 15 / 结构 15 / 细节 15 / 事实 15。
-断句或事实有硬伤直接不直发；分数不过线自动重写一轮，还不过线进**待审队列**，
-在网页上人工看一眼再决定发不发。
+A companion Android app (`app/dist/shudong-xray-1.3.0.apk`) lets you browse, post, and
+pull the whole account roster onto your phone with a single QR scan.
 
 ---
 
-## 二、装
+## What makes it different
+
+### 1. It tries hard to read like a person
+
+Not "stuff a prompt and hope". Every piece of content goes through five stages:
+
+- **Form sampling** — length and shape are drawn from the real distribution of the
+  corpus (fragment / one-liner / two-liner / question / list / full paragraph).
+  Short posts carry no trailing period; long ones must be punctuated and paragraphed.
+- **Persona** — 32 identities spread across four campuses, different majors, different
+  schedules and personalities (gentle, sardonic, aloof, socially anxious, foodie,
+  night owl, engineering nerd, lovesick...). The same topic comes out differently.
+- **De-duplication** — one post may only be commented by one account within six hours
+  (atomic claim in SQLite); a given piece of core advice may only appear once per
+  thread; template sentence patterns, opening words and filler words all have quotas.
+- **Exit checks** — AI-flavoured vocabulary, self-repetition, cross-campus leakage,
+  and weather consistency (no "sitting in the sun" on a rainy day).
+- **No invented facts** — uncertain details get looked up online; if not found, it says
+  so instead of making up a specific name.
+
+### 2. Emotional posts get real advice, not sympathy
+
+For relationship / loneliness / grievance posts, it does **not** use the
+"me too + here is my own little story" pattern — that is where AI writing smells worst.
+Instead:
+
+> judgement first → name what the person is actually stuck on → one concrete action
+> (ideally a sentence they can say out loud) → close with a plain truth.
+
+This structure was derived from tens of thousands of real highly-upvoted comments:
+the ones that get upvoted give a judgement, explain the reason, and hand over a method,
+with a clear stance. Long comments come in three tiers (100–200 / 150–260 / 120–220
+characters) chosen by how intense the thread is.
+
+### 3. Multi-dimensional emotional modelling
+
+Before writing, each item gets a **stance**, not a generic template:
+
+- **8 moods** — daily / rant / grievance / romance / loneliness / help / complaint / sharing
+- **Gender perspective** — male / female / unknown, changing how the writer refers to
+  themselves and what they notice
+- **Long-post detection** — if the OP wrote 300 characters, a five-character reply is
+  an insult; it switches to a long tier automatically
+- **Stance** — complain together with a complaint, give a concrete method to a request
+  for help, name the blocker for loneliness. No cross-contamination.
+
+### 4. Data foundation
+
+Ships with a retrieval stack built from a real community corpus (posts + comments +
+vectors). Dense vectors from `bge-m3`, sparse keyword inverted index, RRF fusion, then
+reranking. At generation time it retrieves "how other people answered similar posts",
+but filters out samples that are just scene-painting, keeping only the ones that locate
+the problem and give a method.
+
+Roughly 100k-scale, ready out of the box — no crawling required.
+
+### 5. Quality gate
+
+Six scored dimensions before anything goes out: punctuation 20 / length 20 / opening 15 /
+structure 15 / detail 15 / facts 15. A hard failure on punctuation or facts blocks
+publication outright; a score below the line triggers one rewrite, and if it still fails
+the item lands in a **review queue** where you decide by hand.
+
+---
+
+## Install
 
 ### Windows
 
-1. 装 **Python 3.10 或更高**：<https://www.python.org/downloads/>
-   安装第一步**一定要勾** `Add Python to PATH`。
-2. 解压这个包到任意目录（路径别有中文和空格，省事）。
-3. 双击 **`启动.bat`**。
-4. 浏览器会自动打开 <http://127.0.0.1:8765>。
+1. Install **Python 3.10+** from <https://www.python.org/downloads/> — tick
+   `Add Python to PATH` on the first screen.
+2. Unzip this package anywhere (avoid paths with spaces or non-ASCII characters).
+3. Double-click **`启动.bat`**.
+4. Your browser opens <http://127.0.0.1:8765> automatically.
 
-第一次启动会自动装依赖（numpy），要等十几秒。
+The first run installs `numpy`; give it a few seconds.
 
 ### macOS / Linux
 
@@ -80,177 +100,187 @@
 bash start.sh
 ```
 
-需要系统里有 `python3`。
+Requires `python3` on PATH.
 
 ---
 
-## 三、第一次用：填两把 Key
+## First run: two API keys
 
-控制台第一次打开会自动跳到「任务与 Prompt」页，顶部有两张卡片：
+The console jumps to the **Tasks & Prompts** page on first load. Two cards at the top:
 
-| 卡片 | 填什么 | 干什么用 |
+| Card | What to fill | What it does |
 |---|---|---|
-| **LLM 配置** | DeepSeek 的 Key（`https://api.deepseek.com/v1`） | 写帖子、写评论、判断情绪 |
-| **向量与精排** | SiliconFlow 的 Key（`https://api.siliconflow.cn/v1`） | 把帖子和记忆变成向量、给候选排序 |
+| **LLM config** | DeepSeek key (`https://api.deepseek.com/v1`) | writes posts, comments, and judges mood |
+| **Vectors & rerank** | SiliconFlow key (`https://api.siliconflow.cn/v1`) | embeds posts and memories, reranks candidates |
 
-两把都填了，顶部「账号矩阵」里的**生成**按钮才会亮。
+The **Generate** button on the Accounts page stays disabled until both are set.
 
-> 只填 DeepSeek 也能跑，但检索会退化成关键词匹配，评论会明显变钝。
-> 建议两个都配。
-
-填完点保存，页面右上角会显示 `LLM ✓ 向量 ✓`。
+> DeepSeek alone also works, but retrieval degrades to keyword matching and comments
+> get noticeably dumber. Configure both.
 
 ---
 
-## 四、生成机器人号
+## Generating bot accounts
 
-打开左侧 **「账号矩阵」** → 中间那张 **「一键生成机器人号」** 卡片。
+Left sidebar → **Accounts** → the **Generate bot accounts** card.
 
-1. 下拉选数量：**1 / 2 / 4 / 8 / 16 / 32**
-2. 点 **生成**
-3. 下面会滚动显示进度：每个号注册成功会打印 `人设 · 校区 → @用户名`
+1. Pick a count: **1 / 2 / 4 / 8 / 16 / 32**
+2. Hit **Generate**
+3. Progress streams below: each successful registration prints
+   `persona · campus → @username`
 
-它做的事：
+What it actually does:
 
-- 程序**自己去服务端注册全新账号**（用户名 + 随机密码，不走微信），
-  不会用到你已有的任何账号；
-- 注册完自动分配一个人设：优先挑**还没被用过**的校区 / 学院 / 专业 / 性格，
-  所以前 32 个号彼此不重样；32 个用完了再生成会循环复用（key 加后缀）；
-- 自动写 `tokens_*.json`（登录凭据）、`account_*.json`（用户名密码）、更新 `config.json`；
-- 注册速度会控制（每个号间隔 2–4 秒），否则会被服务端限流。
-
-生成完，账号卡片会出现在上面的矩阵里。每个号可以单独暂停 / 恢复 / 改发帖时间。
-
-> 想先看效果不想真发？见下面 **dry_run**。
+- Registers **brand-new accounts on the server** itself (username + random password,
+  no WeChat involved). It never touches any account you already have.
+- Assigns a persona right after: it prefers campuses / majors / personalities that are
+  **not used yet**, so the first 32 accounts are all distinct; beyond that it cycles
+  and appends a suffix to the key.
+- Writes `tokens_*.json` (credentials), `account_*.json` (username/password) and updates
+  `config.json`.
+- Throttles registration (2.5–4.5 s between accounts) to avoid rate limits.
 
 ---
 
-## 五、dry_run 是什么
+## What `dry_run` means
 
-页面右上角有个开关，`DRY` / `LIVE`。
+Top-right toggle: `DRY` / `LIVE`.
 
-| 状态 | 行为 |
+| State | Behaviour |
 |---|---|
-| **DRY**（默认） | 所有动作**只写日志，不发到社区**。帖子进待审队列、评论只在「我的内容」里能看到 |
-| **LIVE** | 真的发出去 |
+| **DRY** (default) | Every action is logged only, nothing reaches the forum. Posts go to the review queue; comments show up under "My content" |
+| **LIVE** | Actually published |
 
-**第一次用一定先跑 DRY**，看两三天它写的东西像不像人，再切 LIVE。
-切 LIVE 会有二次确认。
+**Run DRY for a couple of days first** and read what it writes. Switching to LIVE asks
+for confirmation.
 
-待审队列在左侧「待审」页：每条都带六项评分和扣分原因，可以改字、通过、让模型重写、打回。
-
----
-
-## 六、开 / 停机器人
-
-- 网页顶栏有 daemon 状态和启停按钮；也可以在「总览」页操作。
-- daemon 会给每个启用的号开一个线程，按各自的作息跑：发帖、评论、回楼中楼、点赞。
-- 关掉黑窗口不会停服务；要停就在网页上点停止。
+The review queue lives under **Review**: each item carries its six scores and the reasons
+for deductions. You can edit, approve, ask the model to rewrite, or reject.
 
 ---
 
-## 七、把花名册送到手机
+## Starting / stopping
 
-电脑上生成完号，手机上要能直接登录，不用一个个输账号密码。
-
-### 方式一：扫码（推荐）
-
-1. 电脑左侧 **「手机同步」** → 「重新生成」，会出现一个二维码
-2. 手机打开 App → **我的** → 花名册 → **扫码导入** → 拍这张二维码（或从相册选图）
-3. 解析成功，整份花名册（含账号密码）就写进手机了
-4. 回到花名册列表，点任意一个号 → **登录**
-
-> 二维码里是**明文密码**，别截图发群。32 个号的码大约 1.7 KB。
-
-### 方式二：文件
-
-1. 「手机同步」页点 **下载 roster.json**
-2. 用微信 / QQ / 数据线把文件传到手机
-3. App → 我的 → 花名册 → **从文件导入** → 选这个文件
-
-### 方式三：粘贴
-
-「复制 JSON」→ 手机剪贴板 → App → 花名册 → **粘贴导入**。
+- Daemon status and start/stop live in the top bar and on the Overview page.
+- The daemon runs one thread per enabled account, following each account's own schedule.
+- Closing the console window does not stop the service; use the stop button in the UI.
 
 ---
 
-## 八、手机 App
+## Sending the roster to your phone
 
-`app/dist/shudong-xray-1.3.0.apk`，Android 6.0 以上，直接装。
+### Option A — QR scan (recommended)
 
-能做什么：
+1. Desktop → **Phone sync** → **Regenerate** to produce a QR code
+2. Phone app → **Me** → Roster → **Scan to import** → photograph the code (or pick from album)
+3. The whole roster (including usernames and passwords) lands on the phone
+4. Tap any entry in the roster list → **Log in**
 
-- 看信息流、板块、搜索、看帖子详情和楼中楼
-- 发帖、评论、回楼中楼、点赞收藏
-- 多账号池：花名册里点一个号就登录，登录过的号可以在「账号池」里随时切换
-- 花名册管理：扫码 / 文件 / 粘贴导入，导出，手动加号
-- 帖子里显示 base36 代号（`#XP76` 这种），方便在电脑上对照
+> The QR code contains **plaintext passwords**. Do not screenshot and share it.
+> A 32-account code is about 1.7 KB.
 
-装的时候要允许「安装未知来源应用」。
+### Option B — file
+
+**Download roster.json**, transfer it to the phone, then app → Me → Roster →
+**Import from file**.
+
+### Option C — paste
+
+**Copy JSON** on the desktop, paste it into the app's **Paste import** dialog.
 
 ---
 
-## 九、目录里都是什么
+## The Android app
+
+`app/dist/shudong-xray-1.3.0.apk`, Android 6.0+.
+
+- Feed, boards, search, post detail and nested comments
+- Post, comment, reply, like, bookmark
+- Multi-account pool: tap a roster entry to log in; switch between logged-in accounts
+- Roster management: QR / file / paste import, export, manual add
+- Shows base36 post codes (`#XP76`) matching the desktop console
+
+You will need to allow "install from unknown sources".
+
+---
+
+## Layout
 
 ```
-启动.bat            双击启动
-start.sh            macOS / Linux 启动
-README.md           这个文件
+启动.bat            one-click launcher (Windows)
+start.sh            launcher (macOS / Linux)
 bot/
-  run.py            入口（web / daemon / 各种命令）
-  server.py         本地控制台
-  manage.py         命令行批量管理
-  szlike/           核心包
-    spawn.py        自动开号
-    antirepeat.py   去重（动作 / 句式 / 短语 / 开头 / 口水词）
-    persona.py      32 套人设
-    voices.py       人设语料
-    human.py        形态、句号、AI 味检测
-    longform.py     长评长帖档位
-    mood.py         情绪 / 性别 / 立场
-    quality.py      六项评分
-    rag.py          混合召回
-    dense.py        向量检索
-    kb.py           知识库注入
-    brain.py        模型调用
-    client.py       社区 API 客户端
-    ops.py          接口封装
-  kb/               知识库 + 语料 + 向量库
-  web/              控制台前端
+  run.py            entry point (web / daemon / one-off commands)
+  server.py         local console
+  manage.py         CLI batch management
+  szlike/           core package
+    spawn.py        account generation
+    antirepeat.py   de-duplication (actions / sentence skeletons / phrases / openings)
+    persona.py      32 personas
+    voices.py       persona corpus
+    human.py        form sampling, punctuation, AI-flavour detection
+    longform.py     long-comment / long-post tiers
+    mood.py         mood / gender / stance
+    quality.py      six-dimension scoring
+    rag.py          hybrid retrieval
+    dense.py        vector search
+    kb.py           knowledge-base injection
+    brain.py        model calls
+    client.py       forum API client
+    ops.py          endpoint wrappers
+  kb/               knowledge base + corpus + vector index
+  web/              console front-end
   config.example.json
   accounts_roster.example.json
 app/
-  dist/             构建好的 APK
-  assets/           前端
-  java/             原生壳
-  build.sh          重新构建
+  dist/             prebuilt APK
+  assets/           WebView front-end
+  java/             native shell
+  build.sh          rebuild
 ```
 
 ---
 
-## 十、常见问题
+## FAQ
 
-**Q：双击启动.bat 一闪就没了**
-没装 Python，或者装的时候没勾 `Add Python to PATH`。重装一次，勾上那个选项。
+**`启动.bat` flashes and disappears**
+Python is missing, or was installed without `Add Python to PATH`. Reinstall with the box
+ticked.
 
-**Q：网页打不开**
-看黑窗口里有没有报错。端口 8765 被占了就改 `bot/config.json` 里的 `web.port`，
-或者启动时加参数 `python bot\run.py web --port 8766`。
+**The page will not open**
+Check the console window for errors. If port 8765 is taken, change `web.port` in
+`bot/config.json`, or start with `python bot\run.py web --port 8766`.
 
-**Q：生成号一直失败**
-大概率被限流了。等十几分钟再试，或者一次少生成几个（先 4 个试试）。
+**Account generation keeps failing**
+Almost certainly rate limiting. Wait ten minutes, or generate four at a time.
 
-**Q：帖子全是英文/乱码**
-`config.json` 里 `llm.base_url` 和 `model` 不匹配。DeepSeek 用 `deepseek-chat`。
+**Output is English / garbled**
+`llm.base_url` and `model` do not match. For DeepSeek use `deepseek-chat`.
 
-**Q：写出来的东西还是很像 AI**
-1. 先确认两把 Key 都填了（向量没配，检索退化成关键词，示范样本会很差）；
-2. 把 `dry_run` 保持 DRY 跑一天，去「待审」页看扣分项，看是断句、事实还是细节问题；
-3. 「任务与 Prompt」页可以改每个号的 system prompt，改完点保存立即生效。
+**It still reads like AI**
+1. Make sure both keys are set — without vectors, retrieval degrades to keywords and
+   the reference samples get bad.
+2. Keep `dry_run` on for a day and read the review queue's deduction reasons.
+3. Every account's system prompt is editable under **Tasks & Prompts**; changes apply
+   immediately.
 
-**Q：能改发帖时间吗**
-能。账号卡片上有「发帖时间」，或者命令行 `python bot\manage.py times`。
+**Can I change posting times?**
+Yes — on the account card, or `python bot\manage.py times`.
 
-**Q：数据会上传吗**
-不会。所有内容只写在本机的 `bot/state.db` 和 `bot/logs/` 里，
-只有生成文字这一步会把帖子原文发给模型 API（DeepSeek / SiliconFlow）。
+**Does it upload my data?**
+No. Everything stays in `bot/state.db` and `bot/logs/` on your machine. Only the text
+being generated is sent to the model API (DeepSeek / SiliconFlow).
+
+---
+
+## License & disclaimer
+
+No license is granted for use in information operations, coordinated inauthentic
+behaviour, harassment campaigns, or any activity that violates the target platform's
+terms of service or applicable law.
+
+Provided as-is, without warranty of any kind. See [DISCLAIMER.md](DISCLAIMER.md).
+
+---
+
+[中文说明](README.zh-CN.md)

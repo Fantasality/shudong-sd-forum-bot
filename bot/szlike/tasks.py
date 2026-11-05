@@ -28,7 +28,11 @@ log = logging.getLogger("szlike.tasks")
 # 话题类型 → 写法。同质化不只出在「写什么」，也出在「用同一种方式写」：
 # 七条帖子全是「今天看到一件小事」的抒情见闻，话题再散也像一个号写的。
 KIND_HINT = {
-    "见闻": "写你今天亲眼看到的一件事，你只是路过或顺手参与了一下，最后不要升华",
+    # 以前这里写的是「写你今天亲眼看到的一件事，你只是路过」——一句话把 32 个号
+    # 全变成了监控摄像头：每条都是「几点 + 在哪 + 看见谁做了什么」。
+    # 真人发帖绝大多数是「我今天干了什么 / 我卡在哪」，旁观别人反而是少数。
+    "见闻": "写你自己今天亲身经历的一件事：你去做什么、中间出了什么岔子、最后怎么样了。"
+            "不要写你站在旁边看见别人做什么——你不是摄像头",
     "吐槽": "先把事实摆清楚（谁、哪里、多少钱、多久），再补一句你的态度，别上纲上线",
     "堵": "写清发生了什么、你卡在哪、最后怎么样了，别堆动作和场景",
     "吃": "写菜名、价格和味道，别编吃饭时的肢体小动作",
@@ -365,6 +369,16 @@ def scheduled_post(ctx: Ctx, hhmm: str) -> tuple[bool, str]:
         if time_open >= max(3, len(recent_open) // 4):
             user = (f"{user}\n\n【开头】最近时间开头的帖子太多了，这条不要用时间开头，"
                     "直接从场景中间或一句话中间写起")
+        # 「我路过、我看见」是比时间开头更深的同质化：换十个话题，句式还是同一个。
+        witness_n = sum(1 for t in recent_open if human.witness_post(t))
+        if witness_n >= 2:
+            user = (f"{user}\n\n【别写旁观】最近已经有 {witness_n} 条是「我旁边看见谁做什么」了。"
+                    "这条必须写你自己今天做了什么、卡在哪、最后怎么样了，"
+                    "不要写你站在旁边看别人。")
+        scene_n = sum(1 for t in recent_open if human.scene_open(t))
+        if scene_n >= 3:
+            user = (f"{user}\n\n【别交代时间地点】最近有 {scene_n} 条都是「几点、在哪」开场。"
+                    "这条不要写时间和地点，直接从你在干什么、卡在哪写起。")
         # 模型对「不要用时间开头」的服从率只有三成，这里再加一道后处理
         allow_time = random.random() < 0.25 and time_open < max(3, len(recent_open) // 3)
         if not allow_time:
@@ -392,6 +406,12 @@ def scheduled_post(ctx: Ctx, hhmm: str) -> tuple[bool, str]:
                                   "只保留一件有结果的事，不要在原句上删字。")
             if not bad and content and re.match(r"^(这破|不是我说|真服了|笑死|无语了|家人们)", content):
                 bad, why = True, "这不是发帖的口吻，是在评论别人的帖子。写你自己今天的事。"
+            if not bad and content:
+                # 旁观结构：主角不是「我」，是「我旁边那个人」。这是发帖最像脚本的地方。
+                wp = human.witness_post(content)
+                if wp:
+                    bad, why = True, (wp + "改成写你自己：你去做什么、中间出了什么岔子、"
+                                      "最后怎么样了。不要写你站在旁边看见别人做什么。")
             if not bad and content:
                 bad, why = campus_violation(content, ctx.campus)
             if not bad and content:

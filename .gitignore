@@ -21,3 +21,6 @@ bot/kb/samples.json
 # 系统
 .DS_Store
 Thumbs.db
+
+# apksigner 生成的 v4 签名辅助文件，不需要进仓库
+*.idsig

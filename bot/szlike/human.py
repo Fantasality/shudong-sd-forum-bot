@@ -584,6 +584,51 @@ def opener(text: str, n: int = 4) -> str:
     return s[:n]
 
 
+# ---------- 旁观式发帖 ----------
+# 「几点 + 在哪 + 看见谁做了什么」是发帖同质化的最大来源：话题再散，句式都是
+# 「我路过，我看见，我想了想」。这类帖子里主角不是我，是「我旁边那个人」，
+# 读起来像监控记录而不是一个人在说话。要逼它写「我自己干了什么」。
+_TIME_OPEN = re.compile(
+    r"^(?:凌晨|早起|早上|上午|中午|下午|傍晚|晚上|夜里|深夜|昨晚|今天|昨天|前天|周末|刚"
+    r"|\d{1,2}\s*点|[一二三四五六七八九十]{1,2}\s*点)")
+_PLACE_W = ("食堂", "图书馆", "宿舍", "教室", "操场", "实验室", "教学楼",
+            "门口", "窗口", "路边", "走廊", "球场", "超市", "驿站", "便利店",
+            "站台", "跑道", "台阶", "电梯", "食堂门口")
+_WITNESS_W = ("看见", "碰到", "遇到", "撞见", "目睹", "瞧见", "瞅见", "看到",
+              "碰见", "听见", "注意到")
+
+
+def witness_post(text: str) -> str:
+    """这条帖子是不是在写「我旁边看见别人做什么」。空串=不是。"""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    wit = [w for w in _WITNESS_W if w in t]
+    if not wit:
+        return ""
+    head = bool(_TIME_OPEN.match(t))
+    place = sum(1 for w in _PLACE_W if w in t)
+    if head and place:
+        return "这条又是「几点 + 在哪 + 看见谁」的旁观结构。"
+    if place and wit:
+        return "这条写的是你旁观别人，不是你自己经历的事。"
+    if len(wit) >= 2:
+        return "这条全是你看见别人的场面。"
+    return ""
+
+
+def scene_open(text: str) -> bool:
+    """是不是「几点、在哪」开场。只用来算配额，不硬拦（提问帖也会这么开头）。"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _TIME_OPEN.match(t):
+        return any(p in t[:18] for p in _PLACE_W)
+    if re.match(r"^(?:在|从|到|路过|刚从)", t):
+        return any(p in t[:14] for p in _PLACE_W)
+    return False
+
+
 def repeats(recent: list[str], text: str, thr: float = 0.4) -> bool:
     """3-gram 重合度。比字符集 Jaccard 准：同义改写不会被误杀，模板套话跑不掉。"""
     a = grams(text)
