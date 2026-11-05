@@ -103,6 +103,77 @@ def weather_clash(text: str) -> str:
     return ""
 
 
+# 现在时下雨的说法。今天没下雨时，正文出现这些就是在编天气。
+# 只收「当下正在发生」的词：一场太阳雨写「淋湿」是真的，但「没带伞」「毛毛雨」
+# 这种一定得配着当下场景，编起来一眼假。
+_RAIN_NOW = (
+    "下雨", "下着雨", "还下着", "雨还没停", "雨没停", "雨停了", "雨变大", "雨小了",
+    "毛毛雨", "小毛毛雨", "小雨", "大雨", "中雨", "阵雨", "雷阵雨", "暴雨",
+    "淋雨", "淋湿", "淋成", "没带伞", "忘带伞", "撑伞", "收伞", "雨伞",
+    "雨里", "雨点", "雨从", "雨声", "湿透", "踩水",
+)
+
+# 明确指向过去/别处的句子，雨可以留着（「昨天那场雨把鞋泡了」）。
+_PAST_MARK = re.compile(
+    r"(昨天|昨晚|前天|上周|上次|那天|去年|以前|当时|那时候|暑假|寒假|回家|老家|"
+    r"天气预报|说今天有雨|可能要下)")
+
+
+# 否定说法先剔掉再判断：「外面阴着，没下雨」是好句子，不能因为里面有「下雨」
+# 两个字就被判成编天气。注意「没带伞」不能剔——它恰恰说明在下雨。
+_NEG_RAIN = re.compile(
+    r"(?:没|没有|不|未|别|不会)(?:有|会)?下(?:过)?雨|雨(?:没|不)(?:有)?下(?:过)?")
+
+
+def fake_rain(text: str) -> str:
+    """今天没下雨，正文却在写正在下雨。返回原因，空串表示没问题。
+
+    这是比 weather_clash 更常见、也更严重的一类：说「今天还下着小雨」的人
+    就站在窗边，抬头就知道是假的。旧版只拦了「下雨天写晒太阳」这一个方向，
+    反方向完全没管，于是 14 条帖子里 6 条在淋雨。
+    """
+    t = text or ""
+    try:
+        from . import events
+        if events.rain_now():
+            return ""
+    except Exception:
+        return ""
+    t = _NEG_RAIN.sub("", t)
+    if not any(w in t for w in _RAIN_NOW):
+        return ""
+    # 按句切开，逐句看：带过去标记的句子放过，剩下的只要沾雨就拦
+    for seg in re.split(r"[。！？\n；]", t):
+        if not any(w in seg for w in _RAIN_NOW):
+            continue
+        if _PAST_MARK.search(seg):
+            continue
+        return (f"今天没下雨，这句却写了「{seg.strip()[:16]}」，"
+                "把雨去掉，或者改成今天真实的天气")
+    return ""
+
+
+_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
+           "七": 7, "八": 8, "九": 9, "十": 10, "十一": 11, "十二": 12}
+
+
+def month_clash(text: str) -> str:
+    """正文把「现在」说成别的月份。返回原因，空串表示没问题。
+
+    「八月想约人去上海看演唱会」发在 11 月，读的人第一反应是这人活在两个月前。
+    只认「今年 X 月」这种明确把当下当锚点的说法；「去年八月」「暑假八月」不管。
+    """
+    t = text or ""
+    import time
+    cur = time.localtime().tm_mon
+    for m in re.finditer(r"今年([一二三四五六七八九十]{1,3}|\d{1,2})月", t):
+        raw = m.group(1)
+        v = int(raw) if raw.isdigit() else _CN_NUM.get(raw)
+        if v and v != cur:
+            return f"现在是 {cur} 月，正文却写「今年{raw}月」，时间说错了，删掉这句里的月份"
+    return ""
+
+
 def board_leak(text: str) -> str:
     """正文里出现了板块名的位置。返回命中的板块名，空串表示干净。"""
     t = (text or "").strip()
@@ -278,9 +349,9 @@ def score(text: str, pl: dict | None = None, *, campus: str = "",
     elif leak:
         parts["fact"] = _r(W["fact"] * 0.3, W["fact"])
         fixes.append(f"把板块名「{leak}」写进正文了，删掉它直接写事")
-    elif weather_clash(t):
+    elif (wx_bad := (weather_clash(t) or fake_rain(t) or month_clash(t))):
         parts["fact"] = 0
-        fixes.append(weather_clash(t))
+        fixes.append(wx_bad)
     elif any(w in t for w in NOTICE):
         parts["fact"] = _r(W["fact"] * 0.5, W["fact"])
         fixes.append("像在复述通知原文，改成你自己遇到的事")

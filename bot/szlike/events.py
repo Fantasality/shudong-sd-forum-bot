@@ -46,9 +46,17 @@ def _get(host: str, path: str, timeout: float = 8.0) -> str:
 
 
 def _weather() -> dict:
+    """daily 是预报，current 是实测。
+
+    只看 daily 会出事：weathercode=51（小毛毛雨）配降水概率 12%，模型就当成
+    「今天在下雨」，一天写八条淋雨、没带伞、雨从门口飘进来，实际一滴没下。
+    是否真的在下雨，必须看 current.precipitation（实测毫米数）。
+    """
     try:
         d = json.loads(_get("api.open-meteo.com",
                             "/v1/forecast?latitude=31.30&longitude=120.59"
+                            "&current=temperature_2m,precipitation,rain,weather_code,"
+                            "relative_humidity_2m,cloud_cover"
                             "&daily=temperature_2m_max,temperature_2m_min,"
                             "precipitation_probability_max,weathercode"
                             "&timezone=Asia%2FShanghai&forecast_days=2"))
@@ -64,7 +72,20 @@ def _weather() -> dict:
                 "code": code,
                 "text": WEATHER_TXT.get(code, "说不准"),
             })
-        return {"today": out[0] if out else {}, "tomorrow": out[1] if len(out) > 1 else {}}
+        cur = d.get("current") or {}
+        now = {
+            "at": cur.get("time"),
+            "temp": cur.get("temperature_2m"),
+            "precip": cur.get("precipitation"),
+            "rain": cur.get("rain"),
+            "humidity": cur.get("relative_humidity_2m"),
+            "cloud": cur.get("cloud_cover"),
+            "code": cur.get("weather_code"),
+            "text": WEATHER_TXT.get(int(cur.get("weather_code") or -1), ""),
+        } if cur else {}
+        return {"today": out[0] if out else {},
+                "tomorrow": out[1] if len(out) > 1 else {},
+                "now": now}
     except Exception as e:
         return {"err": f"{type(e).__name__}: {str(e)[:60]}"}
 
@@ -147,28 +168,61 @@ def today(max_age: float = 3600) -> dict:
 
 
 def rain_now() -> bool:
-    """今天是不是在下雨 / 大概率下雨。
+    """现在到底下没下雨。只认实测，不认预报文案。
 
-    用来挡「今天下大雨，阳台上晒的被子」这种硬伤：天气是唯一一条
-    所有人都能当场验证的事实，写错了整条帖子就废了。
+    旧版是 `"雨" in text` 就算下雨。于是 weathercode=51（小毛毛雨）一进缓存，
+    rain_now() 一整天返回 True，模型就照着写「雨还没停」「没带伞」「雨从门口
+    飘进来」，而实测降水 0.0mm、全天降水概率 6%——一眼假，本地人当场能验。
+
+    现在只认两件事：
+        1. current.precipitation >= 0.05mm —— 此刻真的在下
+        2. 拿不到实测时，才退回「日降水概率 >= 55%」这种保守判断
+    预报文案里有「雨」字，不代表在下雨。
     """
-    w = (today().get("weather") or {}).get("today") or {}
+    wx = today().get("weather") or {}
+    now = wx.get("now") or {}
     try:
-        if float(w.get("rain") or 0) >= 55:
-            return True
+        p = now.get("precip")
+        if p is not None:
+            return float(p) >= 0.05
     except Exception:
         pass
-    return "雨" in str(w.get("text") or "")
+    day = wx.get("today") or {}
+    try:
+        return float(day.get("rain") or 0) >= 55
+    except Exception:
+        return False
+
+
+_WEEK = "一二三四五六日"
 
 
 def brief(campus: str = "", with_notice: bool = True) -> str:
-    """给 prompt 的一句话背景。"""
+    """给 prompt 的一句话背景。
+
+    第一段必须是日期。不给日期，模型只能从语料里猜现在是几月，于是出现
+    「今年 8 月想去看演唱会」这种在 11 月发出、本地人一眼看穿的句子。
+    第二段必须说清「现在下没下雨」，不能只丢一个 weathercode——「小毛毛雨」
+    配降水概率 12%，模型会当成正在下。
+    """
     d = today()
-    w = (d.get("weather") or {}).get("today") or {}
+    wx = d.get("weather") or {}
+    w = wx.get("today") or {}
     parts = []
+    t = time.localtime()
+    parts.append(f"今天是{t.tm_year}年{t.tm_mon}月{t.tm_mday}日 星期{_WEEK[t.tm_wday]}")
     if w:
-        parts.append(f"今天苏州{w.get('text')}，{w.get('tmin'):.0f}-{w.get('tmax'):.0f}℃，"
-                     f"降水概率{w.get('rain')}%")
+        tmin, tmax = w.get("tmin"), w.get("tmax")
+        rng = f"{tmin:.0f}-{tmax:.0f}℃" if tmin is not None and tmax is not None else ""
+        if rain_now():
+            parts.append(f"苏州现在真的在下雨（{w.get('text') or '有雨'}），{rng}")
+        else:
+            # 别用 daily 的 weathercode 说天气：code=51 是「小毛毛雨」的预报，
+            # 配上「此刻没下雨」会自相矛盾，模型反而更容易抓错重点。用实测 code。
+            real = (wx.get("now") or {}).get("text") or w.get("text") or "多云"
+            parts.append(f"苏州今天{real}，{rng}，"
+                         f"此刻没下雨（降水概率{w.get('rain')}%），"
+                         "不要写淋雨、没带伞、下雨这类跟现实不符的话")
     if with_notice:
         ns = d.get("notices") or []
         if ns:
@@ -187,6 +241,8 @@ def search(query: str, k: int = 3) -> str:
             hits.append(f"{n['date']} {n['title']}")
     w = (d.get("weather") or {}).get("today") or {}
     if w and re.search(r"(天气|下雨|温度|几度|冷|热)", q):
-        hits.insert(0, f"今天{w.get('text')}，{w.get('tmin'):.0f}-{w.get('tmax'):.0f}℃，"
-                       f"降水概率{w.get('rain')}%")
+        tmin, tmax = w.get("tmin"), w.get("tmax")
+        rng = f"{tmin:.0f}-{tmax:.0f}℃" if tmin is not None and tmax is not None else ""
+        now_txt = "现在在下雨" if rain_now() else "此刻没下雨"
+        hits.insert(0, f"今天{w.get('text')}，{rng}，{now_txt}")
     return "\n".join(hits[:k]) if hits else "本地没有相关的当日信息"

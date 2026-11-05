@@ -342,8 +342,12 @@ def scheduled_post(ctx: Ctx, hhmm: str) -> tuple[bool, str]:
         try:
             ev = events.brief(ctx.campus)
             if ev:
-                user = (f"{user}\n\n【今天】{ev}。可以自然带一句天气，"
-                        "但不要复述通知原文、不要写通知编号")
+                user = (f"{user}\n\n【今天】{ev}。"
+                        "这段只是给你自己对时间的锚，不是正文素材：正文里不要写"
+                        "「11月5日」「星期四」「11月5号」这种日期，也不要提"
+                        "「今年几月」；要指时间就用「今天下午」「昨天晚上」这种日常说法。"
+                        "天气只能用这里给的，今天没下雨就别出现雨、伞、淋湿、湿鞋。"
+                        "不要复述通知原文、不要写通知编号")
         except Exception:
             pass
         if ctx.profile:
@@ -945,6 +949,16 @@ def random_comment(ctx: Ctx, max_n: int = 1) -> tuple[bool, str]:
             length=length_txt, hint=human.sticker_hint(pl),
             long_text=bool(lf),
         )
+        # 评论也得知道今天几号、下没下雨。不然随口一句「今天还下着雨」，
+        # 或者把现在当成别的月份，本地人一眼看出是假的。
+        if enabled:
+            try:
+                ev = events.brief(ctx.campus, with_notice=False)
+                if ev:
+                    user = (f"{user}\n\n【今天】{ev}。这只是背景，别把日期写进正文；"
+                            "不要自己推月份；今天没下雨就别写雨、伞、淋湿。")
+            except Exception:
+                pass
         if enabled:
             # 姿态放最后：前面是知识库和示范，通用约束在上面，这里是最具体的一条。
             # 长文例外：mood.brief 是「说一句你在」这种短评指令，会跟拆解/分析打架
@@ -993,7 +1007,8 @@ def random_comment(ctx: Ctx, max_n: int = 1) -> tuple[bool, str]:
         if not bad and cand:
             bad, why = campus_violation(cand, ctx.campus)
         if not bad and cand:
-            wc = quality.weather_clash(cand)
+            wc = (quality.weather_clash(cand) or quality.fake_rain(cand)
+                  or quality.month_clash(cand))
             if wc:
                 bad, why = True, wc
         if not bad and cand and len(cand) > pl["hi"] + 12:
