@@ -74,10 +74,12 @@ CANARY = "sk-CANARY-DO-NOT-LEAK-9f3a"          # 自测用假 key，验证导出
 # 字节级兜底：model_input 等「原样导出」的文本可能意外夹带密钥形态的内容，
 # 而它并不在任何 SENSITIVE_KEYS 字段里、不会进入 secrets 清单。这里直接按形态抹掉：
 #   1) sk-xxx 前缀的厂商密钥值；2) api_key/token/password=xxx 之类的赋值片段。
+# 注意：值类只含 [A-Za-z0-9_-]，绝不含引号/逗号/换行/尖括号 —— 否则会吃掉
+# CSV/JSON/HTML 的结构性字符（尤其是 CSV 字段的收尾引号），把导出文件弄坏。
 _SECRET_TOKEN_RE = re.compile(
     rb"sk-[A-Za-z0-9_\-]{6,}"
     rb"|\b(?:api[_-]?key|password|passwd|token|secret|authorization|access[_-]?key)"
-    rb"\s*[:=]\s*[\"']?[A-Za-z0-9_\-\./]{4,}[\"']?",
+    rb"\s*[:=]\s*[A-Za-z0-9_\-]{4,}",
     re.IGNORECASE,
 )
 

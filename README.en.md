@@ -382,7 +382,9 @@ RAG injection. The two sample sheets in this repo were generated with the switch
 [Side-by-side preview (first 15 questions)](docs/exams/对比预览.md)
 
 Sheets contain real forum posts and real human comments as questions and reference answers.
-**Third-party gateway addresses are redacted**; only model names remain.
+**Third-party gateway addresses are redacted**; only model names remain. Phone numbers,
+QQ / WeChat / group IDs appearing in human comments are masked too, while prices, dates
+and building numbers are kept intact.
 
 ### L1 score comparison (measured; do not read a single round)
 
