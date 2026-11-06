@@ -49,7 +49,7 @@ SPECS: dict[str, dict] = {
         "role": "苏州大学的学生，看电影看书看展，习惯记住具体的作品细节",
         "rules": [
             "只写一件事：看到了什么作品、哪一句打动你，不解释它代表什么",
-            "禁止用「治愈」「温柔」「岁月」「喧嚣」「斑驳」「氤氲」这类词",
+            "我记住的是画面和台词本身，落笔也只写这些，脑子里没有别的形容词",
             "可以短，可以没头没尾，不要升华、不要总结",
         ],
         "comment_rule": "提一个具体的作品细节，或说一句你的看法，不夸人",
@@ -70,7 +70,7 @@ SPECS: dict[str, dict] = {
         "role": "苏州大学的学生，拖延症晚期，习惯先承认自己烂再讲事",
         "rules": [
             "写一件今天没做成的小事，具体到时间、次数或吃的东西",
-            "自嘲但不卖惨、不求助、不喊「废了」这类口号",
+            "我认了自己没做成，说完这句就搁下，该干嘛干嘛",
             "结尾不要突然励志，烂就烂在那里",
         ],
         "comment_rule": "用自嘲接一句，落到你能给的说法上",
@@ -91,7 +91,7 @@ SPECS: dict[str, dict] = {
         "role": "苏州大学的学生，社恐，说话前会反复删改，习惯绕开人群",
         "rules": [
             "写一个今天没敢做或做得很小声的瞬间，具体到地点和动作",
-            "不求助、不自我诊断、不喊「社恐」这个词",
+            "我把声音放得很轻，只写刚才那一下发生了什么",
             "句子可以断在半路，结尾不要总结",
         ],
         "comment_rule": "小声附和半句，别太热情",
@@ -112,7 +112,7 @@ SPECS: dict[str, dict] = {
         "role": "苏州大学的学生，爱运动，习惯用配速、组数、比分说话",
         "rules": [
             "写一次训练或比赛，带至少一个数字（配速、重量、比分、时长）",
-            "写身体的具体反应（喘、抖、汗、腿沉），不写「爽」「燃」",
+            "我只会报身体给我的数：喘成什么样、腿沉到哪一步、第几组开始抖",
             "不喊坚持、不鼓励别人、不总结运动的意义",
         ],
         "comment_rule": "补一个数字或问一句具体的训练细节",
@@ -133,7 +133,7 @@ SPECS: dict[str, dict] = {
         "role": "苏州大学的学生，追星追剧，记得住场次、票价和具体桥段",
         "rules": [
             "写一件和喜欢的作品或现场有关的具体事，带日期、票价、曲目、集数之一",
-            "兴奋但不刷感叹号，不用「绝了」「封神」这类词",
+            "我记得住的只有场次、票价和那一帧画面，写下来就是那几样，语速快但句子平",
             "不拉踩、不安利、不求同好",
         ],
         "comment_rule": "接一个具体的桥段或场次，别只说喜欢",
@@ -154,7 +154,7 @@ SPECS: dict[str, dict] = {
         "role": "苏州大学的学生，正在准备考研，生活被进度和错题切成一段一段",
         "rules": [
             "写今天复习里的一个具体卡点或进度，带科目、页数、错题数",
-            "焦虑藏在动作里，不喊「崩溃」「上岸」这类口号",
+            "我把心慌折算成页数和错题数，今天卡在第几遍、错几道，写这些就够了",
             "不互相打气、不给择校建议、结尾不要励志",
         ],
         "comment_rule": "交换一句进度或说一句自己也卡在这",
@@ -176,7 +176,7 @@ SPECS: dict[str, dict] = {
         "rules": [
             "写一件具体的追番、抽卡、漫展或买周边的事，带数字（集数、抽数、价格）",
             "用圈内词但不解释、不科普、不推荐作品",
-            "不喊「yyds」「绝绝子」，结尾不总结",
+            "圈里的说法顺手就用，说完那件事就停，字都落在事情上",
         ],
         "comment_rule": "接一个圈内才懂的细节，别解释",
         "reply_rule": "短，接梗就行",
@@ -196,7 +196,7 @@ SPECS: dict[str, dict] = {
         "role": "苏州大学的学生，爱拍照，习惯说清时间、地点和器材",
         "rules": [
             "写一次拍摄，说清时间、地点、拍了什么",
-            "不评价美丑、不写「氛围感」这类词、不晒器材优越感",
+            "我只交代时间、地点、按了几张、挑出哪张，好不好看留给看的人",
             "写完这次拍的什么、结果怎样就停，不总结",
         ],
         "comment_rule": "问一句跟拍照有关的事，或者说一句实在的看法",
@@ -326,3 +326,101 @@ EXTRA_COMMENT_STYLES.update({
     "obsess": ["给一句你的判断，带点自嘲", "说一个实在的做法", "短，别劝"],
     "lone": ["说一句你也在", "用一个具体的小事实接住", "别问太多，附和一句"],
 })
+
+
+# ---------------------------------------------------------------- 风格锚（真实短评论）
+# few-shot 只借语感、不借素材：按 context 关键词从 kb/raw.db / comments 捞真人短评。
+# 零第三方依赖；查询结果按关键词组合缓存；db 缺失时返回空、不崩。
+import hashlib as _hashlib
+import os as _os
+import random as _random
+import re as _re
+import sqlite3 as _sqlite3
+
+_STYLE_DB = _os.path.join(
+    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "kb", "raw.db")
+_STYLE_CACHE = {}          # 缓存 DB 查询结果：key -> list[str]
+_SHORT_MIN, _SHORT_MAX = 4, 30
+
+
+def _cn_keywords(context: str, max_n: int = 6) -> list:
+    """零依赖切 2-4 字中文片段给 LIKE 用（不引分词库）。"""
+    kws = []
+    for block in _re.findall(r"[\u4e00-\u9fff]{2,}", context or ""):
+        for n in (2, 3, 4):
+            for i in range(0, len(block) - n + 1, 2):
+                w = block[i:i + n]
+                if w not in kws:
+                    kws.append(w)
+                    if len(kws) >= max_n:
+                        return kws
+    return kws
+
+
+def _short_rows(where: str, args: tuple, limit: int) -> list:
+    """一条限量 SQL，扫到够就停，不把全表读进内存。where 固定、值全参数化。"""
+    con = _sqlite3.connect(_STYLE_DB)
+    try:
+        rows = con.execute(
+            "SELECT content FROM comments "
+            f"WHERE length(content) BETWEEN {_SHORT_MIN} AND {_SHORT_MAX} "
+            f"AND ({where}) LIMIT {limit}", args).fetchall()
+    finally:
+        con.close()
+    out = []
+    for (c,) in rows:
+        s = (c or "").strip()
+        if _SHORT_MIN <= len(s) <= _SHORT_MAX:
+            out.append(s)
+    return out
+
+
+def _style_match(kws: tuple) -> list:
+    """关键词合成一条 OR、只扫一次表；按关键词组合缓存命中结果。"""
+    if not kws:
+        return []
+    key = "kw:" + "|".join(kws)
+    if key not in _STYLE_CACHE:
+        where = " OR ".join(["content LIKE ?"] * len(kws))
+        args = tuple("%" + w + "%" for w in kws)
+        try:
+            _STYLE_CACHE[key] = _short_rows(where, args, 240)
+        except (_sqlite3.Error, OSError):
+            _STYLE_CACHE[key] = []
+    return _STYLE_CACHE[key]
+
+
+def _style_pool() -> list:
+    """兜底真实短句池，一次限量取回后缓存。"""
+    if "pool" not in _STYLE_CACHE:
+        try:
+            _STYLE_CACHE["pool"] = _short_rows("1", (), 600)
+        except (_sqlite3.Error, OSError):
+            _STYLE_CACHE["pool"] = []
+    return _STYLE_CACHE["pool"]
+
+
+def style_samples(kind: str, persona: str, context: str = "", k: int = 3) -> list[str]:
+    """返回 k 条真实短评论（4-30 字）当风格锚。
+
+    按 context 的中文关键词在 kb/raw.db / comments 里 LIKE 限量检索；
+    kind / persona / context 经稳定 hash 扰动，不同人设、不同上下文拿到不同组合；
+    命中不足 k 条时用随机真实短句补足。只给语感，不返回长段落。
+    raw.db 不存在时返回 []。
+    """
+    if k <= 0 or not _os.path.isfile(_STYLE_DB):
+        return []
+
+    matched = list(dict.fromkeys(_style_match(tuple(_cn_keywords(context)))))
+    seed = int.from_bytes(
+        _hashlib.sha256(f"{kind}|{persona}|{context}".encode("utf-8")).digest()[:8], "big")
+    rng = _random.Random(seed)
+    rng.shuffle(matched)
+
+    out = matched[:k]
+    if len(out) < k:
+        seen = set(out)
+        pool = [s for s in _style_pool() if s not in seen]
+        rng.shuffle(pool)
+        out.extend(pool[:k - len(out)])
+    return out

@@ -1,29 +1,29 @@
 {
-  "fetched_at": "2026-11-05 14:23:28",
+  "fetched_at": "2026-11-06 15:54:43",
   "weather": {
     "today": {
-      "date": "2026-11-05",
-      "tmax": 18.8,
-      "tmin": 14.2,
-      "rain": 6,
-      "code": 51,
-      "text": "小毛毛雨"
-    },
-    "tomorrow": {
       "date": "2026-11-06",
-      "tmax": 21.0,
-      "tmin": 12.1,
-      "rain": 0,
+      "tmax": 19.4,
+      "tmin": 13.3,
+      "rain": 4,
       "code": 3,
       "text": "阴"
     },
+    "tomorrow": {
+      "date": "2026-11-07",
+      "tmax": 19.6,
+      "tmin": 13.4,
+      "rain": 75,
+      "code": 80,
+      "text": "阵雨"
+    },
     "now": {
-      "at": "2026-11-05T14:15",
-      "temp": 18.4,
+      "at": "2026-11-06T15:45",
+      "temp": 19.0,
       "precip": 0.0,
       "rain": 0.0,
-      "humidity": 70,
-      "cloud": 81,
+      "humidity": 65,
+      "cloud": 85,
       "code": 3,
       "text": "阴"
     }

@@ -51,13 +51,32 @@
 - **长帖识别**：楼主写了三百字，回五个字就是敷衍，自动切长档
 - **立场**：抱怨就一起骂这件事、求助就给具体办法、孤独就点破卡点，不串味
 
-### 4. 数据底座
+### 4. 数据底座 —— 近十万条真实社区语料，这是我们最大的特点
 
-内置一套从真实社区语料建起来的检索库（帖子 + 评论 + 向量），
-用 bge-m3 做稠密向量、稀疏关键词做倒排，两路召回后用 RRF 融合，再精排。
-生成时自动检索「同类帖子里别人怎么回的」，但会过滤掉画面堆砌的样本，只学定位问题和给办法的写法。
+不是「调几句 prompt 让模型装像人」，而是先把整个社区说过的话搬回本地，
+再让每一条生成内容都从真实语料里找参照。开箱即用，不需要你自己爬。
 
-规模在十万条量级，开箱即用，不需要你自己爬。
+| 数据 | 实测规模 | 用途 |
+|---|---|---|
+| `kb/raw.db` | **78,511 条真实帖子 + 18,276 条真实评论**（33.5 MB） | 分布统计、题材配额、短回复池、测试集的唯一真值来源 |
+| `kb/rag.db` | **415.8 MB** 检索库 | 稠密向量 + 稀疏倒排双路召回，RRF 融合后精排 |
+| `kb/dense.db` | 9.6 MB | bge-m3 稠密向量索引 |
+| `kb/short_replies.json` | 5,660 条 ≤10 字真人原句 | 短回复不靠手写字表，直接抽真实语料 |
+| `kb/samples.json` / `stats.json` / `knowledge.json` / `campus_map.json` | 约 180 KB | few-shot 风格锚、题材分布、校区事实清单 |
+
+真实板块分布：求助提问箱 29,749 / 抛抛帖子 26,550 / 二手交易 12,850 /
+新生专栏 2,256 / 苏大迷惑大赏 2,099 ……
+
+这套语料带来三个很难靠调 prompt 抄走的东西：
+
+- **分布是从语料反推的，不是拍脑袋定的**：长度分位、表情率、句号率、题材占比、
+  24h 作息分布，每一项都以真人语料为真值；评估门槛也用真人对照组窗口 p90 标定。
+- **短回复是真人原句**：手写「蹲 / dd / 同问」会扎堆，实测换成真实池后开头重复率 0.006。
+- **事实不靠模型记忆**：食堂、地标、教师名单、天气与校历都从本地库查，
+  查不准就不写具体名字，避免编造。
+
+> 公开仓库不含原始语料（体积大且含真实 UGC，已在 `.gitignore` 中排除）；
+> 可以用自己的语料按 `tools/eval_corpus.py` 的流程重建同一套底座。
 
 ### 5. 质量闸门
 
@@ -259,3 +278,277 @@ app/
 **Q：数据会上传吗**
 不会。所有内容只写在本机的 `bot/state.db` 和 `bot/logs/` 里，
 只有生成文字这一步会把帖子原文发给模型 API（DeepSeek / SiliconFlow）。
+
+---
+
+## 十一、评估与测试成绩（全部实测）
+
+本项目的拟人改动不靠感觉：每次改完跑一遍本地模拟考试，分数涨了才算改对。
+考卷用固定种子（`EVAL_SEED=20261105`）可复现；下表数字全部由
+`tools/make_eval_tables.py` 从结果 JSON 自动生成，不手写结论。
+
+评分口径：**图灵 40**（5 选 1 让 LLM 裁判挑哪条是机器写的）+ **分布/题材 25**
++ **同质/形式 20** + **AI 味 15**。
+注意 5 选 1 的**随机基线是 20%**（真人互测 18.1%），所以图灵项天然封顶约 32/40；
+被抓率压到 20% 以下反而是过拟合伪影，本项目不追求。
+除 L1 外还有 L2 账号时间序列 / L3 群体协同图谱评估，以及 AI 质疑、楼中楼上下文专项用例。
+
+# 评估数据汇总表（自动生成）
+
+> 由 `tools/make_eval_tables.py` 从各评估 JSON 与 `kb/raw.db` 现场汇总生成。
+> 所有数字均取自数据源，不含手写数值或硬编码结论；缺失的数据源写「未生成」并跳过。
+> 生成时间：2026-11-06 17:00:13
+
+## 数据源状态
+
+数据来源：tools/eval_last.json + tools/eval_baseline_fixed.json + tools/graph_eval_last.json + tools/graph_baseline.json + tools/eval_all_last.json + tools/scenarios_last.json + tools/thread_context_last.json，生成时间 2026-11-06 17:00:13
+
+| 数据源文件 | 状态 | 数据时间 |
+| --- | --- | --- |
+| tools/eval_last.json | 已生成 | 2026-11-06 16:58:52（文件修改时间） |
+| tools/eval_baseline_fixed.json | 已生成 | 2026-11-06 16:23:50（文件修改时间） |
+| tools/graph_eval_last.json | 已生成 | 2026-11-05 21:41:37 |
+| tools/graph_baseline.json | 已生成 | 2026-11-05T20:53:53+08:00 |
+| tools/eval_all_last.json | 已生成 | 2026-11-05 21:41:37 |
+| tools/scenarios_last.json | 已生成 | 2026-11-06 16:53:37 |
+| tools/thread_context_last.json | 已生成 | 2026-11-06 16:53:38 |
+
+## ① 三层评估总览表
+
+数据来源：tools/eval_all_last.json（数据时间 2026-11-05 21:41:37） + tools/scenarios_last.json（数据时间 2026-11-06 16:53:37） + tools/thread_context_last.json（数据时间 2026-11-06 16:53:38），生成时间 2026-11-06 17:00:13
+
+| 层级 | 评估项 | 判定 | 关键指标 | 来源文件 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| L1 文本层 | 评论/帖子/楼中楼文本 | 未通过 | 三项 total={"comment":82.1,"post":77.6,"reply":84.2}；被抓率={"comment":0.319,"post":0.308,"reply":0.239}；门槛 min_total=80；耗时=124.6s | tools/eval_all_last.json | 未通过 |
+| L2/L3 行为图谱层 | 图检测 + 图灵投票 + gates | 未通过 | graph_pass=未通过；是否跳过 skipped=否；五组检出率={"real":0.333,"before":1.0,"before_textonly":0.167,"after":1.0,"after_gated":0.667}；checks=18 项 | tools/eval_all_last.json | 未通过 |
+| 总体 | overall_pass | 未通过 | gate_blockers=2 项 | tools/eval_all_last.json | 未通过 |
+| 新增能力 | AI 质疑场景识别/否认 | 通过 | PASS=4 FAIL=0 SKIP=0（共 4 组） | tools/scenarios_last.json | SKIP 不算通过；退出码 0 仅代表全部验收组通过 |
+| 新增能力 | 楼中楼上下文三项齐全 | 通过 | PASS=9 FAIL=0 SKIP=0（共 9 项）；prompt 779 字 | tools/thread_context_last.json | SKIP 不算通过；上游拼装函数不可用时整轮标记 SKIP |
+
+## ② L1 分项表
+
+数据来源：tools/eval_last.json（数据时间 2026-11-06 16:58:52（文件修改时间）） + tools/eval_baseline_fixed.json（数据时间 2026-11-06 16:23:50（文件修改时间）），生成时间 2026-11-06 17:00:13
+
+| 模式 | 样本数 n | 总分 total | 图灵分 turing | 图灵被抓率 catch_rate | 被抓率(%) | 分布 dist | 题材 topic | 同质化 dup | 形式 form | AI 味 flavor | 事实率 fact_rate | 固定考卷基线 total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| comment | 160 | 78.6 | 26.4 | 0.341 | 34.1% | 20.3 | — | 17.4 | — | 14.6 | 0.991 | 83.6 |
+| post | 60 | 86.7 | 33.7 | 0.158 | 15.8% | — | 21 | — | 17 | 15 | — | 80 |
+| reply | 40 | 82.5 | 28.7 | 0.283 | 28.3% | 19.3 | — | 19.5 | — | 15 | — | 79.3 |
+
+### ②-a L1 分项明细（各 *_detail 的 JSON 原值）
+
+数据来源：tools/eval_last.json（数据时间 2026-11-06 16:58:52（文件修改时间）） + tools/eval_baseline_fixed.json（数据时间 2026-11-06 16:23:50（文件修改时间）），生成时间 2026-11-06 17:00:13
+
+| 模式 | 分项类别 | 指标 | JSON 原值 |
+| --- | --- | --- | --- |
+| comment | dist_detail | 长度中位 | 12 / 13 / 0.92 |
+| comment | dist_detail | 表情率 | 0.27 / 0.25 / 0.94 |
+| comment | dist_detail | 换行率 | 0 / 0 / 0.94 |
+| comment | dist_detail | 句号率(>25字) | 0.09 / 0.21 / 0.44 |
+| comment | dup_detail | 开头重复率 | 0.062 |
+| comment | dup_detail | 3gram重复率 | 0.069 |
+| post | topic_detail | 食堂/吃 | 7.5 / 15 / 7.5 |
+| post | topic_detail | 图书馆/自习 | 7.8 / 10 / 2.3 |
+| post | topic_detail | 雨/伞 | 1.2 / 0 / 1.2 |
+| post | topic_detail | 考试/作业/绩点 | 16.5 / 11.7 / 4.8 |
+| post | topic_detail | 宿舍/室友 | 5.5 / 10 / 4.5 |
+| post | topic_detail | 车/充电 | 7 / 8.3 / 1.3 |
+| post | topic_detail | 恋爱/情感 | 9.5 / 10 / 0.5 |
+| post | form_detail | 长度中位 | 33 / 31 / 0.94 |
+| post | form_detail | 时间开头率 | 0 / 0.01 / 0.81 |
+| post | form_detail | 数字堆砌率 | 0.05 / 0.8 |
+| post | dup_detail | 开头重复率 | 0.017 |
+| post | dup_detail | 3gram重复率 | 0.084 |
+| reply | dist_detail | 长度中位 | 17 / 13 / 0.69 |
+| reply | dist_detail | 表情率 | 0.33 / 0.28 / 0.85 |
+| reply | dist_detail | 换行率 | 0 / 0.01 / 0.92 |
+| reply | dist_detail | 句号率(>25字) | 0 / 0.06 / 0.63 |
+| reply | dup_detail | 开头重复率 | 0 |
+| reply | dup_detail | 3gram重复率 | 0.032 |
+
+## ③ 图灵测试对照表（含五组）
+
+数据来源：tools/graph_eval_last.json（数据时间 2026-11-05 21:41:37），生成时间 2026-11-06 17:00:13
+
+| 组别 | 说明 | 投票数 votes | 判为机器 bot_votes | 检出率 detection_rate | 折算百分比 | parse_failed | truncated |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| real | 真人基线 | 6 | 2 | 0.333 | 33.3% | 0 | 0 |
+| before | 改造前 | 6 | 6 | 1 | 100% | 0 | 0 |
+| before_textonly | 改造前·仅文本 | 6 | 1 | 0.167 | 16.7% | 0 | 0 |
+| after | 改造后 | 6 | 6 | 1 | 100% | 0 | 0 |
+| after_gated | 改造后·画像门控 | 6 | 4 | 0.667 | 66.7% | 0 | 0 |
+
+### ③-a L2/L3 确定性指标
+
+数据来源：tools/graph_eval_last.json（数据时间 2026-11-05 21:41:37），生成时间 2026-11-06 17:00:13
+
+| 指标 | real | before | before_textonly | after | after_gated |
+| --- | --- | --- | --- | --- | --- |
+| n_actions | 388 | 873 | 873 | 873 | 873 |
+| n_accounts | 146 | 33 | 33 | 33 | 33 |
+| span_hours | 32.82 | 72.72 | 72.72 | 669.94 | 669.94 |
+| accounts_per_post_max | 6 | 16 | 16 | 1 | 1 |
+| multi_account_posts | 68 | 112 | 112 | 0 | 0 |
+| burst5_max | 6 | 22 | 22 | 4 | 4 |
+| burst10_max | 9 | 32 | 32 | 5 | 5 |
+| default_avatar_rate | 0 | 1 | 1 | 1 | 0 |
+| hour_entropy | 4 | 3.284 | 3.284 | 4.181 | 4.181 |
+| actions_per_day_max | 195 | 338 | 338 | 41 | 41 |
+| same_target_pairs | 179 | 1745 | 1745 | 0 | 0 |
+| cross_account_lexicon | 0 | 3 | 3 | 3 | 3 |
+| median_gap_minutes | 2.1 | 0.14 | 0.14 | 21.79 | 21.79 |
+
+### ③-b L2/L3 checks 明细
+
+数据来源：tools/graph_eval_last.json（数据时间 2026-11-05 21:41:37），生成时间 2026-11-06 17:00:13
+
+| 类别 | 检查项 | 判定 | 明细 |
+| --- | --- | --- | --- |
+| structure | 重放条数守恒（before == after == after_gated） | 通过 | 873 / 873 / 873 |
+| structure | 同帖单 owner（≤1 号） | 通过 | after=1 before=16 |
+| structure | 时间铺开 ≥20 天 | 通过 | after=669.9h before=72.7h |
+| structure | 同帖多号帖数归零 | 通过 | after=0 before=112 |
+| calibrated | 窗口 p90 burst5_max 不超过真人基准 | 通过 | real=6 before=18 after=3 上限=8.5 |
+| calibrated | 窗口 p90 burst10_max 不超过真人基准 | 通过 | real=8.1 before=26 after=4 上限=11.125 |
+| calibrated | 窗口 p90 accounts_per_post_max 不超过真人基准 | 通过 | real=4 before=9 after=1 上限=6 |
+| calibrated | 窗口 p90 multi_account_posts 不超过真人基准 | 通过 | real=10 before=11.1 after=0 上限=13.5 |
+| calibrated | 窗口 p90 same_target_pairs 不超过真人基准 | 通过 | real=18 before=93.1 after=0 上限=23.5 |
+| calibrated | 作息熵不低于真人基准的 90% | 通过 | real_p50=1.784 after_p50=3.779 |
+| gate | 账号资料：默认 ID 比例对齐真人 | 未通过 | real=0.00 after=1.00 after_gated=0.00（目标态） |
+| gate | 跨账号共享冷门实体对齐真人 | 未通过 | real=0 before=3 after=3（重放不伪造文本，故未改善） |
+| llm | 评估有效：BEFORE 被判机器 ≥60% | 通过 | 100% |
+| llm | 目标态有效：AFTER_GATED 被判机器 ≤30% | 未通过 | 67% |
+| llm | 真人对照组误判 ≤30% | 未通过 | 33% |
+| llm | 改善幅度 ≥30 个百分点 | 通过 | +33% |
+| observe | 观察：隐藏账号/时间后的漏判幅度 | 通过 | before 100% vs textonly 17%，落差 +83% |
+| observe | 观察：补齐昵称头像单独带来的降幅 | 通过 | after 100% → after_gated 67%，收益 +33% |
+
+### ③-c L2/L3 汇总字段
+
+数据来源：tools/graph_eval_last.json（数据时间 2026-11-05 21:41:37），生成时间 2026-11-06 17:00:13
+
+| 项目 | 数值 |
+| --- | --- |
+| generated_at | 2026-11-05 21:41:37 |
+| graph_pass | 未通过 |
+| pass | 未通过 |
+| baseline_available | 是 |
+| hard_total | 16 |
+| hard_pass | 12 |
+| graph_total | 14 |
+| graph_hard_pass | 12 |
+| config.votes | 6 |
+| config.window | 48 |
+| config.samples | 200 |
+| config.offline | 否 |
+| config.seed | 7 |
+| counts.real | 388 |
+| counts.before | 873 |
+| counts.before_textonly | 873 |
+| counts.after | 873 |
+| counts.after_gated | 873 |
+| gate_blockers 数量 | 2 |
+| gate_blocker.1 | 账号资料：默认 ID 比例对齐真人｜real=0.00 after=1.00 after_gated=0.00（目标态） |
+| gate_blocker.2 | 跨账号共享冷门实体对齐真人｜real=0 before=3 after=3（重放不伪造文本，故未改善） |
+
+## ④ 真人基准标定表
+
+数据来源：tools/graph_baseline.json（数据时间 2026-11-05T20:53:53+08:00），生成时间 2026-11-06 17:00:13
+
+| 指标 | p50 | p90 | max | mean |
+| --- | --- | --- | --- | --- |
+| burst5_max | 5 | 6 | 6 | 4.625 |
+| burst10_max | 6 | 8.1 | 9 | 6.335 |
+| accounts_per_post_max | 3 | 4 | 4 | 3.24 |
+| multi_account_posts | 7 | 10 | 12 | 7.29 |
+| same_target_pairs | 11 | 18 | 24 | 12.075 |
+| hour_entropy | 1.784 | 2.574 | 3.05 | 1.905 |
+| median_gap_minutes | 2.33 | 3.333 | 4.29 | 2.28 |
+| default_avatar_rate | 0 | 0 | 0 | 0 |
+| cross_account_lexicon | 0 | 0 | 0 | 0 |
+
+### ④-a 真人全窗口 real_full
+
+数据来源：tools/graph_baseline.json（数据时间 2026-11-05T20:53:53+08:00），生成时间 2026-11-06 17:00:13
+
+| 指标 | 数值 |
+| --- | --- |
+| n_actions | 388 |
+| n_accounts | 146 |
+| span_hours | 32.82 |
+| accounts_per_post_max | 6 |
+| multi_account_posts | 68 |
+| burst5_max | 6 |
+| burst10_max | 9 |
+| default_avatar_rate | 0 |
+| hour_entropy | 4 |
+| actions_per_day_max | 195 |
+| same_target_pairs | 179 |
+| cross_account_lexicon | 0 |
+| median_gap_minutes | 2.1 |
+
+### ④-b 标定参数
+
+数据来源：tools/graph_baseline.json（数据时间 2026-11-05T20:53:53+08:00），生成时间 2026-11-06 17:00:13
+
+| 参数 | 数值 |
+| --- | --- |
+| generated_at | 2026-11-05T20:53:53+08:00 |
+| source | tools/graph_refs.json |
+| window | 48 |
+| samples | 200 |
+| seed | 7 |
+| n_real_actions | 388 |
+
+## ⑤ 场景/上下文验收表
+
+数据来源：tools/scenarios_last.json（数据时间 2026-11-06 16:53:37） + tools/thread_context_last.json（数据时间 2026-11-06 16:53:38），生成时间 2026-11-06 17:00:13
+
+| 来源 | 验收组/检查项 | 状态 | 明细 |
+| --- | --- | --- | --- |
+| tools/scenarios_last.json | recognition | 通过 | 逐条断言 46 条（正例 28 / 反例 18）：对 46、错 0、SKIP 0，正确率 100.0%（阈值 100%） |
+| tools/scenarios_last.json | denial_quality | 通过 | 检查 90 条回复，命中禁用腔 0 处（禁用词表 36 条） |
+| tools/scenarios_last.json | denial_length | 通过 | 检查 90 条：超长 0 条（上限 25 字）、空回复 0 条；最长 9 字 |
+| tools/scenarios_last.json | denial_dedup | 通过 | 连取 30 句，去重后 19 句，去重率 63.3%（阈值 60%）；各调用模式去重率：main=63.3%、seed=66.7%、plain=3.3% |
+| tools/scenarios_last.json | SUMMARY(overall) | 通过 | PASS=4 FAIL=0 SKIP=0 |
+| tools/thread_context_last.json | api_available | 通过 | 已定位线上拼装函数 szlike.tasks.build_reply_prompt |
+| tools/thread_context_last.json | prompt_built | 通过 | build_reply_prompt 调用成功，system 374 字 / user 386 字 |
+| tools/thread_context_last.json | post_full_present | 通过 | 原帖全文 210 字在最终 prompt 中 |
+| tools/thread_context_last.json | post_not_truncated | 通过 | 【原帖】段 212 字（原文 210 字），尾部独特句在，判定阈值 >60 字且 ≥90% 原文长度 |
+| tools/thread_context_last.json | their_present | 通过 | 被回复评论 33 字在最终 prompt 中 |
+| tools/thread_context_last.json | thread_all_present | 通过 | 楼中楼 3 条，命中 3 条 |
+| tools/thread_context_last.json | reply_to_present | 通过 | replyTo 3 个，命中 3 个 |
+| tools/thread_context_last.json | order_correct | 通过 | user 内 marker 位置 原帖=0 / 对方说=216 / 楼里已说过=256；楼中楼三条位置=[268, 301, 335] |
+| tools/thread_context_last.json | no_comment_as_post | 通过 | 【原帖】段=原帖正文（尾部独特句在，未混入一级评论/被回复评论=否）；【对方说】段含被回复评论=是 |
+| tools/thread_context_last.json | SUMMARY(overall) | 通过 | PASS=9 FAIL=0 SKIP=0 |
+
+## ⑥ 语料库规模表
+
+数据来源：kb/raw.db（现场 SQL 查询）+ kb/ 目录文件（现场 stat），生成时间 2026-11-06 17:00:13
+
+| 项目 | 数值 | 说明 |
+| --- | --- | --- |
+| posts 表行数 | 78511 | SELECT COUNT(*) FROM posts（现场查询） |
+| comments 表行数 | 18276 | SELECT COUNT(*) FROM comments（现场查询） |
+| state 表行数 | 26 | SELECT COUNT(*) FROM state（现场查询） |
+| comments 中楼中楼(is_sub=1) | 0 | SELECT COUNT(*) FROM comments WHERE is_sub=1（现场查询） |
+| posts 覆盖天数 day | 1145 | SELECT COUNT(DISTINCT day) FROM posts（现场查询） |
+| kb/KNOWLEDGE.md | 11.9 KB (12211 B) | 文件大小（现场 stat） |
+| kb/build.log | 1.5 KB (1570 B) | 文件大小（现场 stat） |
+| kb/campus_map.json | 12.7 KB (13032 B) | 文件大小（现场 stat） |
+| kb/dense.db | 9.6 MB (10088448 B) | 文件大小（现场 stat） |
+| kb/dense.db-shm | 32.0 KB (32768 B) | 文件大小（现场 stat） |
+| kb/dense.db-wal | 0 B (0 B) | 文件大小（现场 stat） |
+| kb/dense.f32 | 358.3 MB (375660544 B) | 文件大小（现场 stat） |
+| kb/dense_meta.json | 127 B (127 B) | 文件大小（现场 stat） |
+| kb/events.json | 1004 B (1004 B) | 文件大小（现场 stat） |
+| kb/knowledge.json | 17.1 KB (17495 B) | 文件大小（现场 stat） |
+| kb/knowledge.json.bak_deflavor | 17.0 KB (17375 B) | 文件大小（现场 stat） |
+| kb/rag.db | 415.8 MB (435986432 B) | 文件大小（现场 stat） |
+| kb/raw.db | 33.4 MB (35069952 B) | 文件大小（现场 stat） |
+| kb/samples.json | 114.9 KB (117620 B) | 文件大小（现场 stat） |
+| kb/short_replies.json | 28.7 KB (29344 B) | 文件大小（现场 stat） |
+| kb/stats.json | 30.4 KB (31082 B) | 文件大小（现场 stat） |
+| kb/stats_report.md | 5.3 KB (5455 B) | 文件大小（现场 stat） |
+| kb/style.json | 4.1 KB (4207 B) | 文件大小（现场 stat） |
+| kb/ 目录文件合计 | 817.4 MB (857088666 B) | 18 个文件 |

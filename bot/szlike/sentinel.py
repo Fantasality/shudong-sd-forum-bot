@@ -1,10 +1,23 @@
-"""哨兵：盯着主人（橘子汽水）的收藏，看到新收藏就派一小撮「对口性格」的号去评论。
+"""哨兵：盯着主账号的收藏，看到新收藏就派**一个**号去评论。
 
-为什么不用 `userPosts(type: MARKED)`：实测列表有分钟级延迟（收藏后 60 秒仍刷不出来），
-但 `post(id){viewerHasMarked}` 是实时的。所以改成盯「最新 N 条帖子的收藏状态」：
-每轮 2 个请求，只有状态从 false 翻成 true 才触发。
+2026-11-05 复盘改版
+------------------
+真人连着发了三帖点名这批号：
+  「都是默认id头像，只在近几天发了两三条帖子，且语气和逻辑都怪怪的」
+  「评论别人几乎也是一起来的」
+  「怎么还有人机互评，这几个号所有的帖子和评论全都密集在一天或两天内」
 
-不经过任何暗语通道，论坛上看不出任何指令痕迹——只是一条帖子底下多了 4 个正常评论。
+原来 dispatch() 一次派 **4 个号**、间隔 15-35 秒评同一条真人帖，
+而且 make_ctx 传 manual=True 跳过 Guard、直接 ops.create_comment 绕过
+claims 占坑与 antirepeat 撞车检查，评论还是另一套独立 prompt 生成的。
+这就是「一窝蜂 / 人机互评」最直接的技术来源。
+
+现在：默认整条链路关闭（config.json 的 sentinel.enabled=false）。
+即便手动开启，也强制单号，且必须走和线上完全相同的准入：
+  本方帖不互评 → claim_post 抢全局唯一 owner → ctx.allow()（冷启动+全局配额）
+  → build_comment_prompt 同一条生成链路 → antirepeat / guard.text_ok
+  → 发成功后 mark + remember_text，失败释放坑。
+一条真人帖永远只会出现一个本方账号。
 """
 from __future__ import annotations
 
@@ -15,7 +28,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import ops
+from . import antirepeat, ops
+from . import tasks as T
 from .brain import Brain
 from .client import Client, SzlikeError
 from .config import account_config
@@ -38,16 +52,27 @@ query Q($n: Int!) { posts(filter: {schoolId: "U2Nob29sOjIy"}, first: $n) {
 
 Q_POST = """
 query Q($id: ID!) { post(id: $id) { id content commentCount
-  creator { username } topic { name } subtopic { name } } }
+  creator { id username } topic { name } subtopic { name } } }
 """
 
-FALLBACK = [
-    "蹲个后续，有结果踢我一下。",
-    "同问，我也想知道。",
-    "帮顶，楼主说的挺真实的。",
-    "看完了，这事得自己拿主意。",
-    "有点意思，等个后续。",
-]
+# 兜底不再用「蹲个后续 / 同问 / 帮顶」这类复读机话术，
+# 真人原话就是「还有复读机」。改从真实语料里抽 <=12 字的短句。
+_SHORT_CACHE: list[str] | None = None
+
+
+def _fallback_line() -> str:
+    global _SHORT_CACHE
+    if _SHORT_CACHE is None:
+        try:
+            d = json.loads((BASE / "kb" / "short_replies.json").read_text(encoding="utf-8"))
+            pool = [x["t"] for k in ("plain", "react")
+                    for x in (d.get(k) or [])
+                    if isinstance(x, dict) and x.get("t")]
+            _SHORT_CACHE = [x for x in pool if 2 <= len(x) <= 12] or ["加一"]
+        except Exception:
+            _SHORT_CACHE = ["加一"]
+    return random.choice(_SHORT_CACHE)
+
 
 PERSONA_KEYWORDS = {
     "food": ["食堂", "饭", "菜", "好吃", "外卖", "奶茶", "夜宵", "零食", "吃", "餐", "面"],
@@ -93,7 +118,8 @@ def make_ctx(cfg: dict, name: str) -> Ctx:
     store = Store(str(BASE / "state.db"), ns="" if acc["name"] == "main" else acc["name"])
     brain = Brain(d.get("llm"))
     guard = Guard(d.get("guard"), store)
-    return Ctx(client, store, brain, guard, d, manual=True)
+    # manual=False：哨兵不再绕过静默时段、配额、冷启动与全局跨账号配额
+    return Ctx(client, store, brain, guard, d, manual=False)
 
 
 def _roster_persona() -> dict[str, str]:
@@ -105,7 +131,7 @@ def _roster_persona() -> dict[str, str]:
 
 
 def pick_targets(cfg: dict, post: dict, count: int, exclude: set[str]) -> list[str]:
-    """按帖子内容挑性格最对口的几个号。"""
+    """按帖子内容挑性格最对口的一个号（count 只会是 1）。"""
     personas = _roster_persona()
     text = ((post.get("content") or "") + " " +
             ((post.get("topic") or {}).get("name") or "")).lower()
@@ -118,39 +144,45 @@ def pick_targets(cfg: dict, post: dict, count: int, exclude: set[str]) -> list[s
         scored.append((score, random.random(), key))
     scored.sort(reverse=True)
     if scored and scored[0][0] > 0:
-        picked = [k for s, _, k in scored if s > 0][:count]
-        if len(picked) < count:
-            rest = [k for s, _, k in scored if k not in picked]
-            random.shuffle(rest)
-            picked += rest[:count - len(picked)]
-        return picked[:count]
-    random.shuffle(scored)
-    return [k for _, _, k in scored[:count]]
+        return [k for s, _, k in scored if s > 0][:1]
+    if not scored:
+        return []
+    return [random.choice(scored)[2]]
 
 
-def _line(ctx: Ctx, post: dict) -> str:
-    text = (post.get("content") or "").strip()[:400]
+def _line(ctx: Ctx, post: dict, prev: list[str]) -> str:
+    """和线上 random_comment 走同一条生成链路，不再另起一套 prompt。"""
+    text = (post.get("content") or "").strip()[:300]
+    board = (post.get("topic") or {}).get("name") or "校园生活"
     try:
-        system = ("你是苏州大学的学生，正在刷校园论坛。看到这条帖子，写一句 12-30 字的评论："
-                  "口语、有具体反应、符合你的人设，不要客套，不要总结，不要堆 emoji，"
-                  "不要用拼音缩写或英文缩写。")
-        user = (f"帖子：{text}\n板块：{(post.get('topic') or {}).get('name') or '校园生活'}"
-                f"\n你的人设：{ctx.label}")
-        out = (ctx.brain.chat(system, user, max_tokens=120) or "").strip()
-        if out:
-            return out.split("\n")[0][:60]
+        spec = T.build_comment_prompt(ctx, text, board, prev=prev,
+                                      post_id=(post.get("id") or ""))
+        if spec.get("early"):
+            return spec["early"]
+        if spec.get("enabled"):
+            out = (ctx.brain.chat(spec["system"], spec["user"], max_tokens=120) or "").strip()
+            if out:
+                out = T.erase_hedges(out)
+                out = T.trim_periods(out)
+                out = T.erase_ai_flourish(out)
+                out = T.fix_period_rate(out)
+                return out.split("\n")[0][:60]
     except Exception as e:
         log.warning("生成评论失败：%s", e)
-    return random.choice(FALLBACK)
+    return _fallback_line()
 
 
-def dispatch(cfg: dict, post_id: str, count: int = 4, exclude: set[str] | None = None) -> list[dict]:
-    """派一小撮号去评论指定帖子。"""
-    exclude = set(exclude or ())
+def dispatch(cfg: dict, post_id: str, count: int = 1,
+             exclude: set[str] | None = None) -> list[dict]:
+    """派**一个**号去评论指定帖子。硬上限 1，不受调用方 count 影响。"""
     scfg = cfg.get("sentinel") or {}
+    if not scfg.get("enabled"):
+        log.info("哨兵默认关闭（2026-11-05 举报复盘），跳过派单 %s", post_id)
+        return []
+
+    exclude = set(exclude or ())
     master = scfg.get("watch_account") or "bot"
     exclude.add(master)
-    gap = scfg.get("gap") or [15, 35]
 
     try:
         mctx = make_ctx(cfg, master)
@@ -159,25 +191,66 @@ def dispatch(cfg: dict, post_id: str, count: int = 4, exclude: set[str] | None =
         log.warning("读帖失败，取消派单：%s", e)
         return []
 
-    names = pick_targets(cfg, post, max(1, min(count, 6)), exclude)
-    if not names:
+    # ① 本方账号发的帖不互评
+    our_ids = {v.get("user_id") for v in (cfg.get("accounts") or {}).values()
+               if isinstance(v, dict) and v.get("user_id")}
+    cid = (post.get("creator") or {}).get("id")
+    if cid and cid in our_ids:
+        log.info("目标帖是本方账号发的，跳过（禁止互评）")
         return []
 
-    sent = []
-    for i, name in enumerate(names):
+    # ② 全局唯一 owner：一条真人帖永久只允许一个本方账号出面
+    if not mctx.store.claim_post(post_id, "sentinel"):
+        log.info("这条帖已被 %s 占，跳过", mctx.store.post_owner(post_id) or "别的号")
+        return []
+
+    names = pick_targets(cfg, post, 1, exclude)
+    if not names:
+        mctx.store.release_post(post_id)
+        return []
+    name = names[0]
+
+    try:
+        ctx = make_ctx(cfg, name)
+        # ③ 冷启动 + 全局跨账号配额（原来 manual=True 直接跳过）
+        ok, why = ctx.allow("comment")
+        if not ok:
+            log.info("[准入] %s 被拒：%s", name, why)
+            mctx.store.release_post(post_id)
+            return []
+
+        # ④ 同帖已有评论，交给撞车检查
+        prev: list[str] = []
         try:
-            ctx = make_ctx(cfg, name)
-            line = _line(ctx, post)
-            node = ops.create_comment(ctx.client, post_id, line, is_anonymous=False)
-            log.info("[%s] 已评论 %s：%s", name, node.get("id"), line[:24])
-            sent.append({"account": name, "persona": ctx.persona,
-                         "comment": node.get("id"), "content": line})
-        except SzlikeError as e:
-            log.warning("[%s] 评论失败：%s", name, e)
-        except Exception as e:
-            log.warning("[%s] 异常：%s", name, e)
-        if i < len(names) - 1:
-            time.sleep(random.uniform(gap[0], gap[1]))
+            d = ops.list_comments(ctx.client, post_id, "LATEST")
+            prev = [(e["node"].get("content") or "")[:120]
+                    for e in (d.get("edges") or [])]
+        except Exception:
+            pass
+
+        line = _line(ctx, post, prev)
+        recent = ctx.store.recent_texts("comment", 20)
+        if antirepeat.check(line, same_post=prev, recent=recent):
+            line = _fallback_line()
+        tok, _ = ctx.guard.text_ok(line)
+        if not tok or not line.strip():
+            mctx.store.release_post(post_id)
+            return []
+
+        node = ops.create_comment(ctx.client, post_id, line, is_anonymous=False)
+        ctx.mark("comment", post_id, line)
+        ctx.store.remember_text("comment", line)
+        log.info("[%s] 已评论 %s：%s", name, node.get("id"), line[:24])
+        sent = [{"account": name, "persona": ctx.persona,
+                 "comment": node.get("id"), "content": line}]
+    except SzlikeError as e:
+        log.warning("[%s] 评论失败：%s", name, e)
+        mctx.store.release_post(post_id)
+        return []
+    except Exception as e:
+        log.warning("[%s] 异常：%s", name, e)
+        mctx.store.release_post(post_id)
+        return []
 
     state = _load()
     trig = state.get("triggers") or []
@@ -185,7 +258,7 @@ def dispatch(cfg: dict, post_id: str, count: int = 4, exclude: set[str] | None =
         "at": datetime.now().isoformat(timespec="seconds"),
         "post": post_id,
         "content": (post.get("content") or "")[:40],
-        "sent": sent,
+        "sent": sent,          # 长度恒为 1
     })
     state["triggers"] = trig[:30]
     _save(state)
@@ -210,9 +283,11 @@ def _mark_flags(ctx: Ctx, ids: list[str]) -> dict[str, bool]:
     return out
 
 
-def watch(cfg: dict, count: int = 4, quiet: bool = False) -> list[dict]:
-    """轮询最新帖子，发现新收藏就派人。首轮只建基线，不触发。"""
+def watch(cfg: dict, count: int = 1, quiet: bool = False) -> list[dict]:
+    """轮询最新帖子，发现新收藏就派一个号。首轮只建基线，不触发。"""
     scfg = cfg.get("sentinel") or {}
+    if not scfg.get("enabled"):
+        return []
     master = scfg.get("watch_account") or "bot"
     state = _load()
     try:
@@ -248,8 +323,7 @@ def watch(cfg: dict, count: int = 4, quiet: bool = False) -> list[dict]:
         return []
 
     out: list[dict] = []
-    for pid in fresh[:2]:
-        log.info("发现新收藏 %s，派人", pid)
-        out.extend(dispatch(cfg, pid, count, exclude={master}))
-        time.sleep(3)
+    for pid in fresh[:1]:
+        log.info("发现新收藏 %s，派一个号", pid)
+        out.extend(dispatch(cfg, pid, 1, exclude={master}))
     return out

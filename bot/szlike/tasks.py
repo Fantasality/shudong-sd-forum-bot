@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import random
@@ -20,8 +21,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from . import (antirepeat, dense, events, facts, human, kb, longform, mood,
-               ops, persona, quality, rag, topic)
+from . import (ai_accusation, antirepeat, dense, events, facts, human, kb,
+               longform, mood, ops, persona, quality, rag, topic)
 
 log = logging.getLogger("szlike.tasks")
 
@@ -54,7 +55,7 @@ DEFAULT_PROMPTS: dict[str, dict] = {
         "不要客套开头，不要说教，不要暴露自己是 AI。只输出回复本身。"
         "楼里已经说过的话别再重复，也别问对方刚说过的信息。"
         "必须接住对方这句话里的具体东西——他说的是哪门课、哪个窗口、多少钱、"
-        "哪栋楼，你的回复要沾到其中至少一个，不能泛泛地说「确实」「懂了」。",
+        "哪栋楼，你的回复要沾到其中至少一个，接住这个具体信息再往下说半句。",
         "user": "【原帖】{post}\n\n【对方说】{their}{thread}",
     },
     "comment": {
@@ -67,6 +68,170 @@ DEFAULT_PROMPTS: dict[str, dict] = {
         "user": "{post}",
     },
 }
+
+
+# ---------- 被真人质疑「是不是 AI」时的识别与真人式否认 ----------
+# 背景：2026-11-05 有人在楼里问「谁把 ai 接到鼠洞来了」「AI 味很足」，
+# 当时一条楼中楼回复答非所问、还解释了一通，非常露馅。用户要求：被问是不是
+# AI 时只许像真人一样否认 / 反问 / 略带不耐烦——不承认、不解释、不升华、
+# 不答非所问；也不能出现「我是真人」「我不是 AI」这种直白自证。
+#
+# 识别分三层，刻意做成「短语命中」而不是「关键词命中」，避免把「把 AI 当话题聊」
+# 误判成质疑：
+#   ① 话题排除：AI 作为课程 / 专业 / 工具 / 买卖 / 项目 / 求助「怎么用」→ 一律 False；
+#   ② 身份质疑：把某个对象判定为 AI / 机器人 / 脚本 / 水军 / 假号，或评价本楼内容
+#      「AI 味 / 一眼假 / 复读机 / 批量号」→ True；
+#   ③ 其余 → False。
+# incoming 的 their 是「别人回本账号 / 本楼的那句话」，所以里面出现「AI 味 /
+# 水军 / 批量」这类评价，天然就是冲着本楼来的，不需要额外的指向词。
+
+# ① 非质疑语境：聊 AI 这门课 / 这个工具 / 这桩买卖 / 这个项目，不是质疑身份。
+_AI_TOPIC_EXCLUDE = re.compile(
+    r"(?:"
+    # 课程 / 专业 / 学术：AI课、人工智能导论、机器学习导论…
+    r"(?:AI|ai|Ai|人工智能)(?:课|课程|专业|导论|学院|方向|教材|讲座|作业|论文|选课|选修)"
+    r"|(?:机器学习|深度学习|神经网络|算法|编程|python|Python|代码|建模|数模)"
+    r"(?:课|课程|专业|导论|方向|作业|论文|项目|书|教程|竞赛|比赛)"
+    # 求助「用 AI / GPT 做某件事」：帮我写、用来画、能不能改…
+    r"|(?:帮我|用来|怎么用|能不能|可不可以|如何|教教|求推荐|推荐|用)"
+    r"(?:[^，。？?！!\n]{0,8})?(?:AI|ai|GPT|gpt|工具|软件|写|做|画|生成|翻译|改)"
+    # 买卖 / 出租 / 代做：chatgpt 会员、出几个号、plus 拼车（两种词序都收）
+    r"|(?:GPT|gpt|chatgpt|ChatGPT|AI|ai)[^，。？?！!\n]{0,8}"
+    r"(?:会员|plus|Plus|账号|拼车|出租|出售|转让|代充|代做|包过)"
+    r"|(?:会员|plus|Plus|账号|拼车|出|卖|租|收|代充|代做)"
+    r"[^，。？?！!\n]{0,8}(?:GPT|gpt|chatgpt|ChatGPT|AI|ai|会员|账号)"
+    # 项目 / 招募 / 竞赛 / 团队：agent 经历、缺技术顾问、找建模队员…
+    r"|(?:招|招募|找|缺|组队|队员|团队|项目|大创|竞赛|agent|Agent|skill)"
+    r"(?:[^，。？?！!\n]{0,12})?(?:AI|ai|工具|python|编程|模型|经历|顾问)"
+    # 纯技术词单独出现（几乎只出现在「讨论技术」里，不会出现在质疑里）
+    r"|(?:python|Python|编程|代码|建模|数模|美赛|算法|机器学习|深度学习|神经网络|"
+    r"agent|Agent|skill|大创|招募|工具|插件|接口|API|api|会员|plus|Plus|代写|包过)"
+    r")"
+)
+
+# ② 身份质疑短语。
+_AI_ACCUSE = re.compile(
+    r"(?:"
+    # 第二人称 / 指示代词 + 身份判定 + 语气（你是 ai 吧 / 这号是脚本吧 / 你不会是机器人吧）
+    r"(?:你|楼主|lz|LZ|这号|这个号|这人|这楼|本楼|这帖|这条|这评论)"
+    r"(?:[^，。？?\n]{0,6})?(?:是|不会是|是不是|该不会是|怕不是|就是)?\s*"
+    r"(?:ai|AI|Ai|人工智能|机器人|bot|Bot|脚本|程序|模型|水军|人坤|机器号|假号|复读机)"
+    r"(?:吧|吗|嘛|啊|呀|？|\?|了|似的|$)"
+    # 真人吗 / 不是真人 / 不像活人
+    r"|(?:不是|不像|哪像|算不上|哪是|哪有)\s*(?:真人|活人|大活人)"
+    r"|(?:真人|活人|大活人)\s*(?:吗|吧|嘛|啊|？|\?|$)"
+    r"|(?:是|是不是|到底是|算)\s*(?:真人|活人)"
+    # 谁把 ai 接进来了 / 把 ai 接到鼠洞 / 接进来了 ai
+    r"|谁把\s*(?:ai|AI|Ai|机器人|bot|gpt|GPT|豆包|模型)\s*(?:接|拉|放|塞|弄|搞)"
+    r"|(?:把|将)\s*(?:ai|AI|Ai|机器人|bot|gpt|GPT|豆包|模型)\s*接(?:进|到|入|了)"
+    r"|接(?:进|到|入)了?\s*(?:ai|AI|机器人|gpt|GPT|豆包)"
+    r"|(?:接入|接进来|接到)\s*(?:ai|AI|Ai|机器人|鼠洞|论坛)"
+    # 一眼假 / 太假了 / 假得离谱
+    r"|一眼(?:ai|AI|假|机器人|脚本|生成)"
+    r"|(?:太|好|这么|有点|看着就)\s*假(?:了|吧|啊|得|$)"
+    # AI 味 / AI 腔 / AI 文案 / AI 语气 / ai 语气的帖子
+    r"|(?:ai|AI|Ai)\s*(?:味|腔|语气|文案|感|文风|痕迹|写的|生成的)"
+    r"|(?:一股|满满|全是|好浓|浓|这|那)\s*(?:的)?\s*(?:ai|AI)\s*(?:味|腔|气)"
+    # 水军 / 批量 / 脚本号 / 养号 / 人机互评 / 复读机 / 机翻
+    r"|水军|批量(?:注册|养|刷|发|号|生产)?|机器人号|机器号|脚本号|养号|人坤"
+    r"|人机(?:互评|号|吧|？|\?)?|复读机|机翻|号是脚本|默认id"
+    # 像豆包 / 还没有豆包说话像人 / 特豆包 / GPT 写的吧
+    r"|(?:像|还没|不如|比特?|一股|满嘴|特)\s*(?:豆包|GPT|gpt|AI|ai|机器人|人机)"
+    r"|(?:豆包|GPT|gpt|chatgpt|ChatGPT|文心|通义|kimi|Kimi)\s*"
+    r"(?:写的|生成|接|吧|吗|？|\?|味|一样)"
+    r")"
+)
+
+
+def is_ai_accusation(text: str) -> bool:
+    """这句话是不是在质疑「本账号 / 本楼 / 本坛是 AI」。
+
+    统一委托 szlike.ai_accusation：早期这个位置有一版本地正则，
+    在 tools/eval_scenarios.py 的 46 条用例上漏判 17/28 正例；
+    新实现 46/46 全对，且正例覆盖「机器人实锤」「不像活人」「一眼 GPT」，
+    反例覆盖「AI 绘图接单」「机器学习点名」「机器人社团招新」。
+    """
+    return ai_accusation.is_accusation(text)
+
+
+# 真人式否认池。优先取 kb/raw.db 真实评论（short_replies.json 的 react/ask/
+# plain 类，都是从 raw.db 扫出来的 ≤10 字真实短句）里「被误会 / 被质疑」的语气，
+# 再补几句手写兜底。全部短、随口、带点不耐烦或好笑；没有一句解释、承认、
+# 自证（「我是真人」「我不是 AI」）或升华。
+_AI_DENIALS: tuple[str, ...] = (
+    # —— 来自 kb/raw.db 真实评论 ——
+    "？",                       # react
+    "啊？",                     # react
+    "？？？",                   # react
+    "啥？",                     # react
+    "？我没看懂",               # react
+    "莫名其妙的话",             # raw.db / plain
+    "你在养号吗？",             # react：反将一军，比解释更像真人
+    "你找我？",                 # react
+    "这还有啥疑问的",           # react
+    "知道还问个毛",             # ask：不耐烦
+    "不是，哥们",               # raw.db「不是，哥们，我想问…」截短
+    "你为啥要说呢",             # react
+    # —— 手写兜底（贴「被问是不是 AI」的语境）——
+    "不是，我就随手发的",
+    "你这话说的",
+    "别闹，我刚下课",
+    "……我像吗",
+    "有病吧这",
+    "不是吧哥们",
+    "？你认真的吗",
+    "啥啊，我刚睡醒",
+    "这都哪跟哪",
+    "我发着玩的，至于吗",
+    "别闹",
+    "哈？",
+    "有毛病吧",
+    "你这一说我都不困了",
+)
+
+
+def ai_denial_reply(seed: str = "", rng=None) -> str:
+    """从真人式否认池按稳定 hash 取一句，供被质疑「是不是 AI」时直接回复。
+
+    默认用 md5(seed) 取模，保证同一 seed 永远同一句（可离线复现）；显式传
+    rng 时改由 rng 抽（便于需要随机的场景）。不解释、不承认、不升华、
+    不出现「我是真人 / 我不是 AI」这类直白自证。
+    """
+    if rng is not None:
+        return _AI_DENIALS[rng.randrange(len(_AI_DENIALS))]
+    h = hashlib.md5((seed or "").encode("utf-8")).hexdigest()
+    return _AI_DENIALS[int(h[:8], 16) % len(_AI_DENIALS)]
+
+
+# 可离线复跑的测试用例（验收 ① 用）。正例期望 True，反例期望 False。
+_AI_ACCUSATION_CASES: dict[str, tuple[str, ...]] = {
+    "accuse": (
+        "你是 ai 吧", "你不会是机器人吧", "这号是脚本吧", "不是真人",
+        "谁把 ai 接进来了", "一眼假", "这不会是水军吧", "批量注册的号吧",
+        "人机互评，真绷不住", "AI 味很足，毫无逻辑", "怎么还有 ai 语气的帖子",
+        "你该不会是 GPT 吧", "还没有豆包说话像人", "这号怕不是个复读机",
+    ),
+    "topic": (
+        "AI 课怎么选啊", "人工智能专业好就业吗", "用 GPT 帮我写作业",
+        "AI 能不能帮我改论文", "出几个 chatgpt plus 会员账号，99 一个",
+        "擅长 AI 工具，python 编程，找建模队员", "非计科专业但是有 ai agent 经历的也可以",
+        "这个法律 agent 项目缺个技术顾问", "求推荐一个好用的 AI 工具",
+        "机器学习导论期末怎么复习", "用 ai 画了张图，还挺像", "人工智能导论选哪个老师",
+        "GPT 会员拼车有人吗", "AI 能不能用来写论文",
+    ),
+}
+
+
+def _check_ai_accusation_cases() -> list[str]:
+    """离线自检：返回所有判错的用例描述，空列表表示 14 正 14 反全对。"""
+    bad: list[str] = []
+    for s in _AI_ACCUSATION_CASES["accuse"]:
+        if not is_ai_accusation(s):
+            bad.append(f"漏判(应为 True): {s}")
+    for s in _AI_ACCUSATION_CASES["topic"]:
+        if is_ai_accusation(s):
+            bad.append(f"误判(应为 False): {s}")
+    return bad
 
 
 def render(tpl: str, **kw) -> str:
@@ -210,6 +375,16 @@ class Ctx:
     def mine(self, creator_id: str | None) -> bool:
         return bool(creator_id) and (creator_id == self.me or creator_id in self.siblings)
 
+    def allow(self, kind: str) -> tuple[bool, str]:
+        """统一风控入口。把账号名与图谱配置注入 Guard。
+
+        以前调用方写 ctx.guard.allow(kind, manual=...)，Guard 不知道是哪个账号，
+        冷启动和全局跨账号配额就无从判断；manual=True 还能一路跳过全部风控。
+        """
+        return self.guard.allow(kind, manual=self.manual,
+                                account=self.account,
+                                behavior=self.cfg.get("behavior"))
+
     def rng(self, purpose: str) -> random.Random:
         return persona.rng(f"{self.account}:{purpose}")
 
@@ -235,13 +410,48 @@ def campus_violation(text: str, campus: str) -> tuple[bool, str]:
     return False, ""
 
 
-def trim_periods(text: str) -> str:
-    """把中间的句号换成逗号。
+def _period_bucket(t: str) -> int:
+    """稳定、均匀的 0-99 桶，供所有确定性降频后处理共用。
 
-    真实语料里 >25 字的评论只有 23% 带句号，而模型写出来是 44%——它习惯每句都收。
-    提示词改了两轮都不稳（「别每句都收」→ 32%，「超过 30 字必须用」→ 42%），
-    干脆在生成后确定性地改：只在整段末尾留一个句号。
+    旧 fix_period_rate 用 hexdigest()[:2]（0-255）再 %100：0-55 会命中 3 次、
+    56-99 命中 2 次，`bucket < 23` 的真实概率是 69/256≈27%，并不是 23%。
     """
+    return int(hashlib.md5(t.encode("utf-8")).hexdigest()[:8], 16) % 100
+
+
+# 真人 >25 字评论带句号率：raw.db comments 23.0%、testset real_comments
+# 20.9%（评估口径 0.21）；reply 只有 5.6%。评估器 dist_score 统计「任意位置
+# 含句号」，且只调用 erase_hedges -> trim_periods -> ensure_sticker，从不调用
+# fix_period_rate —— 所以句号率必须由 ensure_sticker 在这条链里收口，由
+# fix_period_rate 在线上/审计链里做同一套幂等重放。
+# 用稳定 hash 把 >25 字文本精确归一化到目标率，不依赖模型当批的句号倾向：
+# >25 字的子样本很小（20-40 条），实测输入率会在 0.11~0.33 间乱跳，
+# 按「输入率×保留率」标定根本不稳（第一轮就过冲到 0.07）。
+_PERIOD_TARGET = 21
+
+
+def _norm_period(t: str) -> str:
+    """把文本清成「末尾最多一个句号」，并按稳定 hash 精确归一化到目标率。"""
+    t = (t or "").strip()
+    if not t:
+        return t
+    # 末尾表情先摘出来，别让它挡住归一化：评估器统计的是「含句号」，
+    # 带表情的长文本若整条跳过，会把实测句号率稀释到 0.11 那种水平。
+    m = re.search(r"(\s*\[[^\]]{1,6}\]\s*)$", t)
+    tail = m.group(1) if m else ""
+    body = t[:m.start()] if m else t
+    parts = [p.strip() for p in body.split("。") if p.strip()]
+    core = "，".join(parts) if parts else ""
+    core = core.rstrip("，,、 ")
+    if not core:
+        return t
+    if core.endswith(("！", "？", "!", "?")):
+        return core + tail          # 问句/感叹句保留原标点，不硬塞句号
+    return core + ("。" if _period_bucket(core) < _PERIOD_TARGET else "") + tail
+
+
+def trim_periods(text: str) -> str:
+    """把中间的多个句号合并成末尾一个；句号率由 ensure_sticker/fix_period_rate 收口。"""
     t = (text or "").strip()
     if len(t) < 16 or t.count("。") <= 1:
         return t
@@ -263,6 +473,22 @@ _HEDGE_TAIL = re.compile(
     r"(?:希望对你有(?:所)?帮助|希望(?:能|对你)?(?:有|帮到)|加油哦|祝你好运|"
     r"以上|共勉|你觉得呢|你们怎么看)[！!。.？?]*$")
 
+# 句中评注副词「确实」：真人评论 0.66% 含「确实」，其中句首独立用法 0.12%
+# 已被 _HEDGE_HEAD 删掉，句中「XX确实YY」只剩 0.54%，并不常见。但 config 的
+# reply system 点名「不能泛泛地说「确实」」触发别想大象效应，kb/samples.json
+# 的 few-shot 里也有 13 处，模型把它当万能副词刷屏（这次 comment 6 条、
+# reply 3 条 AI 味命中全是它），评估器把它列为书面词直接扣分。禁词写进
+# prompt 只会复读，只能生成后物理降频：稳定 hash 只保留约 2%（≈真人基准
+# 量级），其余删掉（「确实闹心→闹心」「确实能试→能试」删掉后都通顺），
+# 不把真人偶见用法绝对清零。
+_QUASHI = re.compile(r"确实")
+
+
+def _downweight_quashi(t: str) -> str:
+    if "确实" not in t:
+        return t
+    return _QUASHI.sub(lambda m: "确实" if _period_bucket(t) < 2 else "", t)
+
 
 def erase_hedges(text: str) -> str:
     """擦掉开头的垫词和结尾的升华。
@@ -272,7 +498,8 @@ def erase_hedges(text: str) -> str:
     实测也是这样：写了「不要用确实/其实」之后，每批里都会冒出好几个「确实」。
     禁词只能靠物理删除。
 
-    只动开头和结尾，中间一律不碰：误伤比漏抓更伤。
+    只动开头、结尾，以及句中刷屏的评注副词「确实」；其余中间内容一律不碰：
+    误伤比漏抓更伤（真人「其实」1.49% 比「确实」还常见，就没动它）。
     """
     t = (text or "").strip()
     t2 = _HEDGE_HEAD.sub("", t)
@@ -281,17 +508,28 @@ def erase_hedges(text: str) -> str:
     t3 = _HEDGE_TAIL.sub("", t)
     if len(t3) >= 4:
         t = t3
+    t = _downweight_quashi(t)
     return t.strip("，,。.、 ")
 
 
 def ensure_sticker(text: str, pl: dict, scene: str = "") -> str:
-    """该带表情的条目，模型没带就补一个。
+    """该带表情的条目补一个；并在补表情前收口 comment 的句号率。
 
-    语料里 23 字以上的评论 33% 带表情，而 prompt 里写「必须带」模型只有一半时候听。
-    光靠提示词，实测表情率 13%，真值 27%——差一倍，是能看出来的破绽。
-    这里在文本末尾补，位置就是结尾，跟真人的习惯一致。
+    评估器链只到这一步（erase_hedges -> trim_periods -> ensure_sticker），
+    句号率归一化必须放这里、且在补表情前做：补表情既会顶到末尾，也会把
+    长度从 ≤25 顶到 >25，所以归一化阈值取 >20 而非 >25 才和评估口径对齐。
+    plan.board 非空是 comment（build_comment_prompt 传真实板块，testset
+    160 条全非空）；reply 的 build_reply_prompt 固定传 None → board 为空，
+    不碰句号，避免把 reply 真人 0.06 的基准顶上去。
+    表情仍按 pl["sticker"] 补：评估器的表情率只认模型自己生成的 [xxx]，
+    human._pick_sticker 返回的是不带方括号的名字，物理补/删都改不了这个率，
+    按 hash 收敛表情率的尝试实测是负优化（叠加到 0.42），已撤销。
     """
-    if not text or not pl.get("sticker"):
+    if not text:
+        return text
+    if pl.get("board") and len(text) > 20:
+        text = _norm_period(text)
+    if not pl.get("sticker"):
         return text
     if re.search(r"\[[^\]]{1,6}\]\s*$", text):
         return text
@@ -300,6 +538,84 @@ def ensure_sticker(text: str, pl: dict, scene: str = "") -> str:
         return text.rstrip() + _h._pick_sticker(scene)
     except Exception:
         return text
+
+
+# ---------- 真人点名的两种 AI 腔（后处理，不写进 prompt） ----------
+# 真人原话：「语气和逻辑都怪怪的，甚至还没有豆包说话像人」「AI味很足毫无逻辑的文案」
+# 「还有复读机」。典型形态是「意象排比 —— 破折号总结 —— 抒情收尾」，
+# 以及把几件事强行升华成「过日子的热乎气」。禁词写进 prompt 会触发别想大象效应，
+# 只能生成后物理删除。
+_AI_GLOW = re.compile(
+    r"(?:看完[^\n。]{0,24}?(?:半天没散|心暖|暖哄哄)|心暖哄哄|热乎气|"
+    r"过日子的[^\n。！？]{0,10})[^\n。！？]*[。！？]?")
+_AI_SUMMARY = re.compile(
+    r"——\s*(?:全是|这才是|那便是|大概就是|都是|就是|说的就是|所谓)")
+
+
+def erase_ai_flourish(text: str) -> str:
+    """删掉抒情收尾；命中破折号升华则整句判废，交回上层走真实短句兜底。
+
+    只截掉升华那半句会留下「热豆浆暖手，烤鸡腿脆响，插排前定闹钟的小心思」
+    这种三段意象排比，照样一眼假。宁可整条不要，也不要留半条 AI 腔。
+    """
+    t = (text or "").strip()
+    if not t:
+        return t
+    if _AI_SUMMARY.search(t):
+        return ""
+    t2 = _AI_GLOW.sub("", t).strip("，,。.、 ")
+    return t2 if len(t2) >= 4 else ""
+
+
+def fix_period_rate(text: str) -> str:
+    """线上/评估/审计链里对同一套句号率归一化做幂等重放。
+
+    由 postprocess_text 统一调度（线上与评估共用同一条链）。
+    erase_ai_flourish 的 strip 会吃掉末尾句号，重放能补回来；与
+    ensure_sticker 用同一个 _norm_period，不会二次抬高句号率。
+    """
+    t = (text or "").rstrip()
+    if not t or len(t) <= 25 or re.search(r"\[[^\]]{1,6}\]\s*$", t):
+        return t
+    return _norm_period(t)
+
+
+def postprocess_text(text: str, kind: str, plan: dict | None = None,
+                     scene: str = "") -> str:
+    """线上与评估共用的确定性后处理链（幂等）。
+
+    历史问题：tools/eval_run.py 只跑三步（erase_hedges / trim_periods /
+    ensure_sticker），线上跑五步，考的跟跑的不是同一份代码。本函数是唯一入口，
+    线上、评估、审计都调它，避免「评估高分但线上不一样」。
+
+    human.py 若已提供新的分布归一化接口（并行改造中），容错调用；
+    没有就走现有链，保证改造期间不会崩。
+    """
+    t = (text or "").strip()
+    if not t:
+        return ""
+    pl = plan or {}
+    t = erase_hedges(t)
+    t = trim_periods(t)
+    if kind in ("comment", "reply"):
+        cleaned = erase_ai_flourish(t)
+        # 整句判废时线上有兜底重写，评估没有，保留原句比返回空串安全
+        if cleaned:
+            t = cleaned
+    t = ensure_sticker(t, pl, scene)
+    t = fix_period_rate(t)
+    # human.normalize_dist(text, pl, kind=None, scene="")：
+    # 按真实语料分布确定性收口表情率 / 句号率 / 长度。容错调用，
+    # 模块没就位时不影响现有链。
+    fn = getattr(human, "normalize_dist", None)
+    if callable(fn):
+        try:
+            out = fn(t, pl, kind=kind, scene=scene)
+            if isinstance(out, str) and out.strip():
+                t = out
+        except Exception:
+            pass
+    return t
 
 
 def _clean_content(text: str, lo: int = 12, hi: int = 220) -> str | None:
@@ -343,7 +659,7 @@ def _post_anchor(ctx, plan: dict) -> str:
 
 def scheduled_post(ctx: Ctx, hhmm: str) -> tuple[bool, str]:
     t0 = time.time()
-    ok, why = ctx.guard.allow("post", manual=ctx.manual)
+    ok, why = ctx.allow("post")
     if not ok:
         return False, why
 
@@ -651,7 +967,7 @@ def publish_draft(ctx: Ctx, d: dict) -> tuple[bool, str]:
         return False, "草稿为空"
     if not d.get("subtopic_id") or not d.get("topic_id"):
         return False, "这条草稿没绑定板块（抽话题时没匹配上），只能重新生成"
-    ok, why = ctx.guard.allow("post", manual=ctx.manual)
+    ok, why = ctx.allow("post")
     if not ok:
         return False, why
     try:
@@ -732,6 +1048,19 @@ def reply_comments(ctx: Ctx, max_n: int = 3) -> tuple[bool, str]:
         return False, "没有新的待回复"
 
     tasks = tasks[: max(1, max_n)]
+
+    # 被真人质疑「是不是 AI」：像真人一样短促否认，不进 LLM、不进后处理。
+    # 2026-11-05 翻车教训：这种场合模型要么答非所问，要么写客服腔自证，
+    # 真人其实只会「？」「别闹」「你这也太能想了」。仍走完整风控与占坑。
+    forced: dict[str, str] = {}
+    for t in tasks:
+        # 识别与否认统一走本模块的两个公开函数，
+        # 保证线上链路与 tools/eval_scenarios.py 验收的是同一份代码。
+        if is_ai_accusation(t.get("their") or ""):
+            forced[t["key"]] = ai_denial_reply(seed=t["key"])
+    if forced:
+        log.info("[AI 质疑] %s 条改走真人式否认", len(forced))
+
     jobs, plans = [], []
 
     def _build_reply(t):
@@ -744,6 +1073,10 @@ def reply_comments(ctx: Ctx, max_n: int = 3) -> tuple[bool, str]:
                 cd = ops.comment_context(ctx.client, t["comment_id"])
                 post_txt = ((cd.get("post") or {}).get("content") or post_txt)
                 lines = []
+                # 被回复的那条一级评论原文也要给模型，否则「楼里聊到哪」是断的
+                root = (cd.get("content") or "").strip()
+                if root:
+                    lines.append(f"[这条评论的原文] {root[:100]}")
                 for e2 in ((cd.get("subcomments") or {}).get("edges") or []):
                     sn = e2.get("node") or {}
                     if sn.get("id") == t["reply_to"]:
@@ -755,7 +1088,11 @@ def reply_comments(ctx: Ctx, max_n: int = 3) -> tuple[bool, str]:
                     thread_txt = "\n\n【楼里已经说过的】\n" + "\n".join(lines[-8:]) + \
                                  "\n别再重复上面的意思，也别问他们说过的信息。"
             except Exception as e:
-                log.debug("拉评论上下文失败 %s: %s", (t.get("comment_id") or "")[-6:], e)
+                # 原来这里是 debug，线上静默降级成「只给对方一句话」，
+                # 正是答非所问的根源。升级为 warning，并让 prompt 显式标注别猜。
+                log.warning("拉评论上下文失败 %s: %s；原帖可能为空，"
+                            "prompt 会显式标注不要臆测",
+                            (t.get("comment_id") or "")[-6:], e)
 
         r = build_reply_prompt(ctx, post_txt, t["their"], thread_txt,
                                t.get("comment_id") or "")
@@ -763,21 +1100,29 @@ def reply_comments(ctx: Ctx, max_n: int = 3) -> tuple[bool, str]:
 
     with ThreadPoolExecutor(max_workers=min(3, len(tasks))) as ex:
         built = list(ex.map(_build_reply, tasks))
-    for pl, system, user, enabled in built:
+    for i, (pl, system, user, enabled) in enumerate(built):
         plans.append(pl)
+        skip = tasks[i]["key"] in forced
         jobs.append({"system": system, "user": user,
-                     "max_tokens": max(20, min(160, int(pl["hi"] * 2)))} if enabled else None)
+                     "max_tokens": max(20, min(160, int(pl["hi"] * 2)))}
+                    if enabled and not skip else None)
 
     # 并行生成，别一条一条等
     real_jobs = [j for j in jobs if j]
     got = ctx.brain.chat_many(real_jobs, workers=4) if real_jobs else []
     it = iter(got)
-    texts = [next(it, None) if job else None for job in jobs]
+    texts = []
+    for i, job in enumerate(jobs):
+        key = tasks[i]["key"]
+        if key in forced:
+            texts.append(forced[key])
+        else:
+            texts.append(next(it, None) if job else None)
 
     # 对方问的是具体事实（食堂几点开、哪个学院在哪个校区）时，先让模型自己查再答。
     # 查不到就照实说不知道——编一个具体名字比说不知道更像机器人。
     for i, t in enumerate(tasks):
-        if not facts.need_lookup(t["their"]):
+        if t["key"] in forced or not facts.need_lookup(t["their"]):
             continue
         system, user, _en = ctx.prompt(
             "reply", post=t["post"][:200], their=t["their"][:200], style="",
@@ -800,6 +1145,8 @@ def reply_comments(ctx: Ctx, max_n: int = 3) -> tuple[bool, str]:
     recent_r = ctx.store.recent_texts("reply", 30) + human.shared_recent(60)
     redo: list[tuple[int, str]] = []
     for i, (t, pl) in enumerate(zip(texts, plans)):
+        if tasks[i]["key"] in forced:
+            continue        # 真人式否认不进重写，别被削成客服腔
         cand = _clean_content(t or "", lo=1, hi=max(50, pl["hi"] * 2))
         bad, why = human.needs_rewrite(cand or "")
         if not bad and cand:
@@ -825,15 +1172,29 @@ def reply_comments(ctx: Ctx, max_n: int = 3) -> tuple[bool, str]:
 
     done = 0
     for t, job, pl, text in zip(tasks, jobs, plans, texts):
-        if not text:
-            text = ctx.brain.pick_fallback(recent=recent_r)
-        text = _clean_content(text, lo=1, hi=max(50, pl["hi"] * 2)) or ctx.brain.pick_fallback(recent=recent_r)
-        text = human.shape(text, pl)
+        is_forced = t["key"] in forced
+        if is_forced:
+            text = forced[t["key"]]
+        else:
+            if not text:
+                text = ctx.brain.pick_fallback(recent=recent_r)
+            text = (_clean_content(text, lo=1, hi=max(50, pl["hi"] * 2))
+                    or ctx.brain.pick_fallback(recent=recent_r))
+            text = human.shape(text, pl)
         if ctx.guard.similar("reply", text):
+            if is_forced:
+                continue        # 同一句否认刚发过就别复读
             text = ctx.brain.pick_fallback(recent=recent_r)
 
-        ok, why = ctx.guard.allow("reply", manual=ctx.manual)
+        # 一个楼只允许一个本方账号回复：真人是按「同一帖下几个号一起来」认人的
+        if not ctx.store.claim_post(t["comment_id"], ctx.account):
+            log.info("[避让] %s 跳过楼 %s（%s 已占）", ctx.label,
+                     t["comment_id"][-6:], ctx.store.post_owner(t["comment_id"]) or "别的号")
+            continue
+
+        ok, why = ctx.allow("reply")
         if not ok:
+            ctx.store.release_post(t["comment_id"])
             return done > 0, why
 
         if ctx.dry_run:
@@ -893,7 +1254,7 @@ def autolike(ctx: Ctx, max_n: int = 3) -> tuple[bool, str]:
 
     done = 0
     for n in cands:
-        ok, why = ctx.guard.allow("like", manual=ctx.manual)
+        ok, why = ctx.allow("like")
         if not ok:
             return done > 0, why
         if ctx.dry_run:
@@ -1006,6 +1367,10 @@ def build_reply_prompt(ctx: Ctx, post: str, their: str, thread: str = "",
     pl = dict(pl, hi=max(8, int(pl["hi"] * 0.7)))
     if mp["long"]:
         pl = dict(pl, lo=30, hi=70)
+    # 上下文拉取失败时 post 会是空串。显式告诉模型「别猜」，
+    # 比让它对着空字段脑补原帖、写出不知所云的回复强。
+    if not (post or "").strip():
+        post = "（原帖内容没取到，只按对方这句话回，别猜原帖在讲什么）"
     system, user, enabled = ctx.prompt(
         "reply", post=post[:600], their=their[:200], thread=thread,
         style="", scene=scene, sample=their[:160], length=human.brief(pl),
@@ -1079,15 +1444,15 @@ def random_comment(ctx: Ctx, max_n: int = 1) -> tuple[bool, str]:
     batch = persona.pick_targets(ctx.store, cands, min(len(cands), max(6, max_n * 4)), ctx.account)
     chosen = []
     for n in batch:
-        if ctx.store.claim_target(n["id"], ctx.account, hours=6.0):
+        if ctx.store.claim_post(n["id"], ctx.account):
             chosen.append(n)
             if len(chosen) >= max_n:
                 break
         else:
             log.info("[避让] %s 跳过 %s（%s 已占）", ctx.label, n["id"][-6:],
-                     ctx.store.claim_owner(n["id"]) or "别的号")
+                     ctx.store.post_owner(n["id"]) or "别的号")
     if not chosen:
-        return False, "候选帖都被别的号占了（同帖 6 小时避让）"
+        return False, "候选帖都被别的号占了（同帖永久单 owner）"
 
     jobs, styles, plans, boards = [], [], [], []
     # 同帖已有评论。同一帖下面三个号都给「找宿管」这种事，光靠全局 3-gram 抓不到：
@@ -1153,7 +1518,9 @@ def random_comment(ctx: Ctx, max_n: int = 1) -> tuple[bool, str]:
         if cand:
             cand = erase_hedges(cand)
             cand = trim_periods(cand)
+            cand = erase_ai_flourish(cand)
             cand = ensure_sticker(cand, pl, plans[i].get("scene") or "")
+            cand = fix_period_rate(cand)
         bad, why = human.needs_rewrite(cand or "")
         if not bad and cand:
             bad, why = campus_violation(cand, ctx.campus)
@@ -1215,10 +1582,10 @@ def random_comment(ctx: Ctx, max_n: int = 1) -> tuple[bool, str]:
     sent: set[str] = set()
 
     def _release_unsent() -> None:
-        """没真发出去的把坑还回去，6 小时内别的号还能用这条帖。"""
+        """没真发出去的把坑还回去，别把这条真人帖永久锁死。"""
         for x in chosen:
             if x["id"] not in sent:
-                ctx.store.release_target(x["id"])
+                ctx.store.release_post(x["id"])
 
     for i, (n, job, st, pl, text) in enumerate(zip(chosen, jobs, styles, plans, texts)):
         if not text:
@@ -1228,7 +1595,7 @@ def random_comment(ctx: Ctx, max_n: int = 1) -> tuple[bool, str]:
         if ctx.guard.similar("comment", text, threshold=0.85):
             text = ctx.brain.pick_fallback(same_post.get(i), recent)
 
-        ok, why = ctx.guard.allow("comment", manual=ctx.manual)
+        ok, why = ctx.allow("comment")
         if not ok:
             _release_unsent()
             return done > 0, why

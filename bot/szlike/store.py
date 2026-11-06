@@ -5,6 +5,12 @@ import sqlite3
 import threading
 import time
 
+# 一条真人帖永久只允许一个本方账号出面（hours<=0 = 不过期）。
+# 原来 claim_target 默认 6 小时、只在 random_comment 一处用，sentinel 完全不占坑；
+# state.db 实证单帖最多被 7 个本方号评论。真人 2026-11-05 发帖说的
+# 「人机互评，评论别人几乎也是一起来的」就是这么来的。
+POST_CLAIM_HOURS = 0.0
+
 
 class Store:
     def __init__(self, path: str = "state.db", ns: str = ""):
@@ -93,11 +99,19 @@ class Store:
                        PRIMARY KEY (kind, target)
                    )"""
             )
+            # 账号冷启动登记。真人抓的第二条指纹是「只在近几天发了两三条帖子」：
+            # 没有出生时间就没法判断账号年龄，只能一律按新号处理。
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS account_meta (
+                       acc  TEXT PRIMARY KEY,
+                       born REAL NOT NULL
+                   )"""
+            )
 
     # ---------- 跨进程占坑 ----------
 
     def claim_target(self, target: str, acc: str = "", kind: str = "comment",
-                     hours: float = 6.0) -> bool:
+                     hours: float = POST_CLAIM_HOURS) -> bool:
         """抢占一条帖子，抢到返回 True。过期的坑会被回收。
 
         这是**唯一**能保证「同一条帖不会被两个号同时评论」的机制：
@@ -105,14 +119,77 @@ class Store:
         """
         if not target:
             return False
-        cutoff = time.time() - hours * 3600
         with self._lock, self.conn:
-            self.conn.execute("DELETE FROM claims WHERE kind=? AND ts<?", (kind, cutoff))
+            # hours<=0 表示永久占坑：真人帖的 owner 不该因为过了几小时就换人
+            if hours > 0:
+                cutoff = time.time() - hours * 3600
+                self.conn.execute("DELETE FROM claims WHERE kind=? AND ts<?", (kind, cutoff))
             cur = self.conn.execute(
                 "INSERT OR IGNORE INTO claims(kind,target,acc,ts) VALUES(?,?,?,?)",
                 (kind, target, acc or "", time.time()),
             )
             return cur.rowcount == 1
+
+    def claim_post(self, post_id: str, acc: str = "",
+                   hours: float | None = None) -> bool:
+        """所有写评论 / 楼中楼的入口统一走这里。
+
+        kind 固定为 post_owner，是为了让 random_comment、reply_comments、sentinel
+        共用同一个坑。以前各自用不同的 kind（甚至不占坑），等于互不知情，
+        于是同一条真人帖下会同时冒出好几个本方账号。
+        """
+        h = POST_CLAIM_HOURS if hours is None else float(hours)
+        return self.claim_target(post_id, acc, kind="post_owner", hours=h)
+
+    def post_owner(self, post_id: str) -> str:
+        return self.claim_owner(post_id, kind="post_owner")
+
+    def release_post(self, post_id: str) -> None:
+        """没真发出去就把坑还回去，别把这条帖永久锁死。"""
+        self.release_target(post_id, kind="post_owner")
+
+    def global_count(self, kind: str, since_ts: float) -> int:
+        """**跨全部账号**的动作总数。
+
+        count_since 带 ns 前缀，只统计单个账号；真人看到的却是整个论坛的密度。
+        33 个号各自「每天 3 帖」= 全局每天 99 帖，这才是「密集在一两天」的来源。
+        """
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM actions WHERE (kind=? OR kind LIKE ?) AND ts>=?",
+                (kind, "%:" + kind, since_ts),
+            ).fetchone()
+            return int(row[0]) if row else 0
+
+    def global_count_today(self, kind: str) -> int:
+        now = time.localtime()
+        midnight = time.mktime(
+            (now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, now.tm_wday, now.tm_yday, -1)
+        )
+        return self.global_count(kind, midnight)
+
+    def global_count_last_hour(self, kind: str) -> int:
+        return self.global_count(kind, time.time() - 3600)
+
+    def account_age_days(self, account: str) -> float:
+        """账号登记以来的天数。首次调用登记为今天（0 天）。
+
+        内容刚被全量清空、账号刚全部停用，所有号重新按新号走冷启动是正确行为：
+        不可能让一批 0 天账号第一天就密集发帖。
+        """
+        if not account:
+            return 999.0
+        with self._lock, self.conn:
+            row = self.conn.execute(
+                "SELECT born FROM account_meta WHERE acc=?", (account,)
+            ).fetchone()
+            if row is None:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO account_meta(acc,born) VALUES(?,?)",
+                    (account, time.time()),
+                )
+                return 0.0
+            return max(0.0, (time.time() - float(row[0])) / 86400.0)
 
     def release_target(self, target: str, kind: str = "comment") -> None:
         """生成失败/没发出去时把坑还回去，别占着不放。"""

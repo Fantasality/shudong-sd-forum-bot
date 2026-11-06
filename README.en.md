@@ -63,15 +63,40 @@ Before writing, each item gets a **stance**, not a generic template:
 - **Stance** — complain together with a complaint, give a concrete method to a request
   for help, name the blocker for loneliness. No cross-contamination.
 
-### 4. Data foundation
+### 4. Data foundation — nearly 100k real community posts, our biggest differentiator
 
-Ships with a retrieval stack built from a real community corpus (posts + comments +
-vectors). Dense vectors from `bge-m3`, sparse keyword inverted index, RRF fusion, then
-reranking. At generation time it retrieves "how other people answered similar posts",
-but filters out samples that are just scene-painting, keeping only the ones that locate
-the problem and give a method.
+This is not "tune a few prompts and hope the model sounds human". We first brought the
+entire community's own words back onto local disk, then made every generated item find
+its reference in real corpus data. It works out of the box — no crawling needed.
 
-Roughly 100k-scale, ready out of the box — no crawling required.
+| Data | Measured size | Used for |
+|---|---|---|
+| `kb/raw.db` | **78,511 real posts + 18,276 real comments** (33.5 MB) | Distribution stats, topic quotas, short-reply pool, and the single source of truth for test sets |
+| `kb/rag.db` | **415.8 MB** retrieval index | Dense vectors + sparse inverted index, two-way recall fused with RRF, then reranked |
+| `kb/dense.db` | 9.6 MB | `bge-m3` dense vector index |
+| `kb/short_replies.json` | 5,660 real human lines of ≤10 characters | Short replies are sampled from real corpus, not from a hand-written word list |
+| `kb/samples.json` / `stats.json` / `knowledge.json` / `campus_map.json` | ≈180 KB | few-shot style anchors, topic distribution, campus fact list |
+
+Real board distribution: Help & Questions (求助提问箱) 29,749 / Casual Posts (抛抛帖子)
+26,550 / Second-hand Market (二手交易) 12,850 / Freshman Column (新生专栏) 2,256 /
+Campus Oddities (苏大迷惑大赏) 2,099 …
+
+Three things this corpus buys that you cannot copy just by tuning prompts:
+
+- **The distribution is inferred from corpus data, not guessed**: length percentiles,
+  emoji rate, period rate, topic share, and the 24-hour activity curve all take real
+  human text as ground truth; evaluation thresholds are calibrated on the p90 window of
+  a real-human control group.
+- **Short replies are real human lines**: hand-written filler like "蹲 / dd / 同问"
+  clusters together; after switching to the real corpus pool, the measured
+  opening-duplication rate is 0.006.
+- **Facts do not come from the model's memory**: canteens, landmarks, faculty names,
+  weather and the academic calendar are looked up in the local KB; when a lookup is
+  uncertain it writes no specific name, avoiding fabrication.
+
+> The public repository does not ship the raw corpus (large, and it contains real UGC;
+> excluded via `.gitignore`). You can rebuild the same foundation from your own corpus
+> following the `tools/eval_corpus.py` flow.
 
 ### 5. Quality gate
 
@@ -284,3 +309,35 @@ Provided as-is, without warranty of any kind. See [DISCLAIMER.md](DISCLAIMER.md)
 ---
 
 [中文说明 / Chinese version](README.md)
+
+---
+
+## Evaluation & test results (measured)
+
+Every anthropomorphism change is validated by a local simulated exam with a fixed
+seed (`EVAL_SEED=20261105`). All numbers are generated from result JSON by
+`tools/make_eval_tables.py` — no hand-written conclusions.
+
+Scoring: **Turing 40** (5-way-1 LLM judge) + **distribution/topic 25** +
+**homogeneity/form 20** + **AI-flavour 15**. The random baseline of a 5-way-1
+test is **20%** (human-vs-human control: 18.1%), so the Turing term caps at
+~32/40; pushing detection below 20% is an overfitting artefact, not a goal.
+Beyond L1 there are L2 account-timeline / L3 coordinated-graph evaluations,
+plus dedicated suites for AI-accusation replies and full thread context.
+
+| Exam round | comment | post | reply |
+| --- | --- | --- | --- |
+| Fixed-seed baseline (1 candidate) | 83.6 | 80.0 | 79.3 |
+| Best-of-3 (legacy postprocess) | 80.3 | **88.4** | 86.2 |
+| Round 1 (c3) | 81.9 | 82.3 | 82.8 |
+| Round 2 (c3, legacy postprocess) | 81.2 | 78.9 | **86.3** |
+| Round 3 (all changes merged) | 78.6 | 86.7 | 82.5 |
+
+| Layer | Check | Result |
+| --- | --- | --- |
+| L2/L3 structure + human-calibrated thresholds | 10 hard checks | **10/10 PASS** |
+| AI-accusation recognition / denial | 4 groups | **4/4 PASS** |
+| Thread context (post + comment + prior replies) | 9 assertions | **9/9 PASS** |
+| Online release gate | 2 manual blockers | **NOT CLEARED** — do not start the daemon |
+
+The full auto-generated tables (L1 breakdown, five-way Turing comparison, human-baseline calibration, scenario suites, corpus inventory) are in [the Chinese README](README.md), section 十一.

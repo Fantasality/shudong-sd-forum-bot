@@ -29,6 +29,7 @@ import re
 import sqlite3
 import time
 import zlib
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -180,31 +181,133 @@ def _concrete(text: str) -> int:
     return s
 
 
+# ------------------------------------------------------------------ 题材配额
+# 照抄 eval_run.py 的 POST_TOPICS：只看正文前 30 字命中哪些词。
+# 一个真实帖可能同时命中多类（「在图书馆吃面包」），无标签 = 7 类一个都不命中。
+TOPIC_KW = {
+    "食堂/吃": ("食堂", "饭", "菜", "鸡", "肉", "汤", "奶茶", "咖啡", "外卖", "煎", "烤", "串", "粉", "面包", "窗口", "吃"),
+    "图书馆/自习": ("图书馆", "自习", "书", "闭馆", "座位", "占座", "借"),
+    "雨/伞": ("雨", "伞", "淋", "湿"),
+    "考试/作业/绩点": ("考试", "考", "作业", "期中", "期末", "复习", "错题", "刷题", "绩点", "保研", "挂科", "论文", "实验", "报告"),
+    "宿舍/室友": ("宿舍", "室友", "寝室", "舍"),
+    "车/充电": ("车", "充电", "桩", "插头", "电动车"),
+    "恋爱/情感": ("喜欢", "分手", "男", "女", "朋友", "暗恋", "约", "对象"),
+}
+NO_LABEL = "无标签"
+
+_topic_cache: dict = {"dist": None, "buckets": None}
+_topic_draw_counts: Counter = Counter()      # 模块级计数：各题材抽中次数（跨账号/跨次）
+_topic_last: list = ["", 0, 0.0]             # [上一题材, 连续次数, 上次时间]，带时间衰减
+
+
+def _topic_match(head: str) -> list[str]:
+    return [k for k, kws in TOPIC_KW.items() if any(w in head for w in kws)]
+
+
+def real_topic_distribution() -> dict:
+    """从 kb/raw.db 的 posts 表统计前 30 字命中 7 类的占比 + 无标签占比，模块内缓存。
+
+    口径与 tools/eval_run.py::topic_dist_score 完全一致：每类独立按「前 30 字
+    命中任一关键词」计占比，另算 7 类都不命中的「无标签」占比。
+    """
+    if _topic_cache["dist"] is not None:
+        return _topic_cache["dist"]
+    c = sqlite3.connect(f"file:{RAW}?mode=ro", uri=True)
+    rows = [r[0] for r in c.execute(
+        "SELECT content FROM posts WHERE length(content) BETWEEN 10 AND 300")]
+    c.close()
+    n = max(1, len(rows))
+    cnt = {k: 0 for k in TOPIC_KW}
+    none = 0
+    for text in rows:
+        m = _topic_match((text or "")[:30])
+        for k in m:
+            cnt[k] += 1
+        if not m:
+            none += 1
+    dist = {k: v / n for k, v in cnt.items()}
+    dist[NO_LABEL] = none / n
+    _topic_cache["dist"] = dist
+    return dist
+
+
+def _label_bucket(label: str) -> list:
+    """把 pool() 的安全候选帖按前 30 字归入 8 个题材桶，模块内缓存。
+
+    桶之间可重叠（一帖可进多类）；无标签桶是 7 类都不命中的帖。
+    """
+    if _topic_cache["buckets"] is None:
+        b = {k: [] for k in TOPIC_KW}
+        b[NO_LABEL] = []
+        for row in pool():
+            m = _topic_match((row[2] or "")[:30])
+            if not m:
+                b[NO_LABEL].append(row)
+            else:
+                for k in m:
+                    b[k].append(row)
+        _topic_cache["buckets"] = b
+    return _topic_cache["buckets"].get(label) or []
+
+
+def _draw_topic_label(r: random.Random) -> str:
+    """按真实题材分布抽一个标签（含「无标签」）；模块级计数+时间衰减做轻量去重。
+
+    只挡「同一题材连发 3 条以上」。无标签是题材缺失、连发本来就是不同的事，
+    不参与去重——否则会人为压掉占比最高的无标签档，反而破坏真实分布。
+    """
+    dist = real_topic_distribution()
+    labels = list(dist)
+    weights = [dist[l] for l in labels]
+    now = time.time()
+    last, streak, t = _topic_last
+    if now - t > 300:                        # 时间衰减：隔太久不算「连着」
+        last, streak = "", 0
+    label = ""
+    for _ in range(4):
+        label = r.choices(labels, weights=weights)[0]
+        if label == NO_LABEL or not (label == last and streak >= 2):
+            break
+    if label == last:
+        streak += 1
+    else:
+        last, streak = label, 1
+    _topic_last[:] = [last, streak, now]
+    _topic_draw_counts[label] += 1
+    return label
+
+
 def draw(account: str = "", seed: int | None = None, board: str | None = None,
          avoid_boards: set[str] | None = None,
-         avoid_kw: tuple[str, ...] | None = None) -> dict | None:
+         avoid_kw: tuple[str, ...] | None = None,
+         label: str | None = None) -> dict | None:
     """在指定板块里按系统时间种子抽一条真实帖。
 
-    板块内的抽法是「先随机取 12 条，按具体性排序，再从前四里随机」：
-    纯 r.choice 常常抽到「捞个周二下午」这种没场景的，永远取第一条又天天一样。
-
-    avoid_kw 用来压题材配额：宿舍/寝室这类场景在种子池里占比过高，
-    实测生成 33% 在写宿舍，而真实语料只有 7.5%。
+    label 非空时改从对应题材桶抽（配额模式）：正文前 30 字自然带该题材，
+    不硬拼关键词；题材桶为空则退回按板块抽。
     """
     rows = pool()
     if not rows:
         return None
     sd = seed if seed is not None else (zlib.crc32(f"{time.time_ns()}:{account}:topic".encode()) & 0xFFFFFFFF)
     r = random.Random(sd)
-    by: dict[str, list] = {}
-    for row in rows:
-        by.setdefault(row[1], []).append(row)
-    avoid = avoid_boards or set()
-    pick = board if (board and board in by) else ""
-    if not pick:
-        boards = [b for b in by if b not in avoid] or list(by)
-        pick = r.choice(boards)
-    cands = r.sample(by[pick], min(16, len(by[pick])))
+    if label is not None:
+        bucket = _label_bucket(label)
+        if bucket:
+            cands = r.sample(bucket, min(16, len(bucket)))
+            avoid_kw = None                 # 配额要的就是这个题材，不再压场景
+        else:
+            label = None                    # 桶空，退回按板块抽
+    if label is None:
+        by: dict[str, list] = {}
+        for row in rows:
+            by.setdefault(row[1], []).append(row)
+        avoid = avoid_boards or set()
+        pick = board if (board and board in by) else ""
+        if not pick:
+            boards = [b for b in by if b not in avoid] or list(by)
+            pick = r.choice(boards)
+        cands = r.sample(by[pick], min(16, len(by[pick])))
     if avoid_kw:
         filtered = [c for c in cands if not any(k in c[2] for k in avoid_kw)]
         if len(filtered) >= 1:      # 配额一旦触发，剩一条也要用
@@ -291,10 +394,13 @@ def too_similar_topic(label: str, recent_labels: list[str], thr: float = 0.34) -
 
 
 def plan(brain, account: str = "", persona: str = "", tries: int = 2,
-         budget: float = 14.0) -> dict:
-    """抽类型 → 抽板块 → 抽真实帖 → 抽象成话题。返回话题/类型/板块/种子帖 id。
+         budget: float = 14.0, quota: bool = True) -> dict:
+    """抽类型 → 抽题材配额 → 抽真实帖 → 抽象成话题。返回话题/类型/板块/种子帖 id。
 
     budget 是总耗时上限：模型偶尔单次要 25s，重抽多轮能拖到一分半，发帖链路等不起。
+    quota=True（默认）时按 raw.db 的真实题材分布抽一个标签（含「无标签」），
+    从对应真实帖里取种子，让正文前 30 字自然带上该题材；传 quota=False 关掉做 A/B。
+    函数签名与返回字段结构保持不变。
     """
     t0 = time.time()
     hist = recent(40)
@@ -341,9 +447,12 @@ def plan(brain, account: str = "", persona: str = "", tries: int = 2,
             if hist and n_hit / len(hist) >= cap:
                 blocked.extend(kws)
         avoid_kw = tuple(blocked) or None
+        # 配额采样：按真实题材分布抽一个标签（含「无标签」），从对应真实帖取种子，
+        # 配额模式下不再用 _SCENE_QUOTA 压场景（要的就是这个题材）。
+        qlabel = _draw_topic_label(r) if quota else None
         d = draw(account, seed=None if i == 0 else
                  (zlib.crc32(f"{time.time_ns()}:{account}:topic:{i}".encode()) & 0xFFFFFFFF),
-                 board=board, avoid_kw=avoid_kw)
+                 board=board, avoid_kw=(None if qlabel else avoid_kw), label=qlabel)
         if not d:
             break
         d.update(kind=kind)

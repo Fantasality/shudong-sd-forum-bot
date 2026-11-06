@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import re
@@ -29,6 +30,50 @@ RAW = ROOT / "kb" / "raw.db"
 STYLE = ROOT / "kb" / "style.json"
 
 _lock = {"t": 0.0, "d": {}}
+
+# ---------------------------------------------------------------- 分布配置
+# 长度分位档切点、长尾截断、以及表情/句号归一化目标一律放在 kb/style.json 的
+# config 里，代码里只留兜底默认值。改分布不用改代码：调 config 后重跑
+# build_style() 会按真实语料重算各段占比，plan() 直接读结果。
+_DEFAULT_CONFIG: dict = {
+    "length_bands": {
+        # 半开区间 [lo, hi)，最后一段恒为 [lo, +∞)。切点取自 raw.db 分位数；
+        # comment/post 沿用已调好的值，改动会直接改变生成长度，故不写死在代码里。
+        "comment": [[1, 6], [6, 12], [12, 23], [23, 44], [44, 97], [97, 999]],
+        "post": [[1, 16], [16, 26], [26, 41], [41, 68], [68, 142], [142, 9999]],
+        # 楼中楼更短：p50≈14、p90≈45、<=10 字占 0.389，与真实楼中楼
+        # (p50 13 / p90 41 / <=10 0.356) 对齐。短段占比明显高于 comment。
+        "reply": [[1, 6], [6, 11], [11, 19], [19, 30], [30, 45], [45, 999]],
+    },
+    # raw.db 没有楼中楼表：用评论长度把长尾截到 cap 做代理，保留真实
+    # <=10 字短回复占比，把 p90 从 50 收到 45，而不是一刀切整体变短。
+    "reply_tail_cap": 45,
+    "dist_target": {
+        # enabled=False 的 kind 不做归一化（post 由线上 shape() 负责，评估也不走这条链）
+        "comment": {"enabled": True, "sticker": 0.25, "period_long": 0.21,
+                    "newline": 0.0, "long_min": 25, "short_keep": 10},
+        "reply": {"enabled": True, "sticker": 0.28, "period_long": 0.06,
+                  "newline": 0.0, "long_min": 25, "short_keep": 10},
+        "post": {"enabled": False},
+    },
+    "_source": "分位档切点/长尾截断/归一化目标可配置；band.p 由 raw.db 真实占比重算",
+}
+
+
+def _config() -> dict:
+    """读 style.json 的 config；缺失/损坏时回退到兜底值。
+
+    直接读文件而不是走 style()，避免「文件不存在 -> style() -> build_style()
+    -> _config()」的递归。
+    """
+    try:
+        d = json.loads(STYLE.read_text(encoding="utf-8"))
+        c = d.get("config")
+        if isinstance(c, dict) and c.get("length_bands") and c.get("dist_target"):
+            return c
+    except Exception:
+        pass
+    return _DEFAULT_CONFIG
 
 # 客服/AI 味词表。右边权重来自 18,276 条真实评论里的出现次数：
 # 0 次 = 3 分（出现即判死），个位数 = 2 分，几十次 = 1 分（不是不能出现，是别扎堆）。
@@ -104,34 +149,61 @@ def _q(sorted_vals: list[int], p: float) -> int:
     return sorted_vals[i]
 
 
+def _band_stats(rows: list[tuple[str, str]], cuts: list[tuple[int, int]],
+                cap: int | None = None) -> list[dict]:
+    """按 config 里的切点切半开区间 [lo, hi)，逐段算真实占比与表情率。
+
+    p 用「语料里真正落在这一段的比例」，而不是写死 0.2：抽样出来的长度分布
+    才等于真人分布。最后一段恒为 [lo, +∞)，保证不漏掉超长文本。
+    cap 用于把 reply 的长尾截断做代理（只影响落段，不改原文）。
+    """
+    def L(t: str) -> int:
+        n = len(t)
+        return min(n, cap) if cap else n
+
+    valid = [(t, b) for t, b in rows if t and t.strip()]
+    n = len(valid) or 1
+    bands: list[dict] = []
+    last = len(cuts) - 1
+    for i, (lo, hi) in enumerate(cuts):
+        if hi <= lo:
+            continue
+        if i == last:
+            seg = [t for t, _ in valid if L(t) >= lo]
+        else:
+            seg = [t for t, _ in valid if lo <= L(t) < hi]
+        if not seg:
+            continue
+        srate = sum(1 for t in seg if re.search(r"\[[^\]]{1,6}\]", t)) / len(seg)
+        bands.append({"lo": lo, "hi": hi, "p": round(len(seg) / n, 4),
+                      "sticker": round(srate, 4)})
+    return bands
+
+
 def build_style(path: Path = STYLE) -> dict:
-    """从语料里数出真实分布，落成 kb/style.json。语料变了重跑即可。"""
+    """从语料里数出真实分布，落成 kb/style.json。语料变了重跑即可。
+
+    分位档切点、长尾截断、归一化目标全部从 config 读；comment/post 沿用已调好
+    的切点（只按当前语料重算各段占比 p 和逐段表情率）。reply 没有独立表，用
+    raw.db 评论长度截短长尾(reply_tail_cap)做代理：保留真实 <=10 字短回复
+    占比 0.389，把 p90 从 50 收到 45、p50 落在 14，和真实楼中楼对齐——是
+    「重算分位」而不是把每条都一刀切变短。
+    """
+    cfg = _config()
     c = sqlite3.connect(RAW)
-    out: dict = {"built_at": time.strftime("%Y-%m-%d %H:%M:%S")}
-    for kind, sql in (
+    out: dict = {"built_at": time.strftime("%Y-%m-%d %H:%M:%S"), "config": cfg}
+    sources = {
         # 评论表没有板块字段，得回连帖子才能按板块统计长度
-        ("comment", "SELECT c.content, p.sub_name FROM comments c "
-                    "LEFT JOIN posts p ON p.id = c.post_id WHERE c.content IS NOT NULL"),
-        ("post", "SELECT content, sub_name FROM posts WHERE content IS NOT NULL"),
-    ):
+        "comment": "SELECT c.content, p.sub_name FROM comments c "
+                   "LEFT JOIN posts p ON p.id = c.post_id WHERE c.content IS NOT NULL",
+        "post": "SELECT content, sub_name FROM posts WHERE content IS NOT NULL",
+    }
+    rows_by_kind: dict[str, list[tuple[str, str]]] = {}
+    for kind, sql in sources.items():
         rows = [(t, b or "") for t, b in c.execute(sql)]
+        rows_by_kind[kind] = rows
         lens = sorted(len(t) for t, _ in rows if t.strip())
-        n = len(lens) or 1
-        # 用分位点切 5 段，每段 20%——这样抽样出来的长度分布天然等于真人分布
-        cuts = [0, _q(lens, 20), _q(lens, 45), _q(lens, 70), _q(lens, 88), _q(lens, 97)]
-        bands = []
-        for i in range(5):
-            lo, hi = cuts[i], cuts[i + 1]
-            if hi <= lo:
-                continue
-            seg = [t for t in (r[0] for r in rows) if max(1, lo) <= len(t) <= hi]
-            srate = (sum(1 for t in seg if re.search(r"\[[^\]]{1,6}\]", t)) / len(seg)
-                     if seg else 0.0)
-            bands.append({"lo": max(1, lo), "hi": hi, "p": 0.2,
-                          "sticker": round(srate, 4)})
-        tot = sum(b["p"] for b in bands) or 1
-        for b in bands:
-            b["p"] = round(b["p"] / tot, 4)
+        cuts = [tuple(x) for x in cfg["length_bands"][kind]]
         stick = sum(1 for t, _ in rows if re.search(r"\[[^\]]{1,6}\]", t))
         only = sum(1 for t, _ in rows if re.fullmatch(r"[\s\[][^\[\]]{1,6}\]", t.strip()))
         dot = sum(1 for t, _ in rows if t.rstrip().endswith("。"))
@@ -140,9 +212,10 @@ def build_style(path: Path = STYLE) -> dict:
         for t, b in rows:
             if b and t.strip():
                 per_board.setdefault(b, []).append(len(t))
+        n = len(rows) or 1
         out[kind] = {
             "n": len(rows),
-            "bands": bands,
+            "bands": _band_stats(rows, cuts),
             "p50": _q(lens, 50),
             "p90": _q(lens, 90),
             "sticker_rate": round(stick / n, 4),
@@ -151,6 +224,23 @@ def build_style(path: Path = STYLE) -> dict:
             "emoji_rate": round(emo / n, 4),
             "board_p50": {b: _q(sorted(v), 50) for b, v in per_board.items() if len(v) >= 30},
         }
+
+    # reply：raw.db 无楼中楼表，用评论长度截尾代理（保留 <=10 字短回复占比）
+    cap = int(cfg.get("reply_tail_cap") or 45)
+    rows = rows_by_kind["comment"]
+    lens_r = sorted(min(len(t), cap) for t, _ in rows if t.strip())
+    stick_r = sum(1 for t, _ in rows if re.search(r"\[[^\]]{1,6}\]", t))
+    n_r = len(rows) or 1
+    cuts_r = [tuple(x) for x in cfg["length_bands"]["reply"]]
+    out["reply"] = {
+        "n": len(rows),
+        "bands": _band_stats(rows, cuts_r, cap=cap),
+        "p50": _q(lens_r, 50),
+        "p90": _q(lens_r, 90),
+        "sticker_rate": round(stick_r / n_r, 4),
+        "short_le10_rate": round(sum(1 for x in lens_r if x <= 10) / n_r, 4),
+        "_proxy": "raw.db 无楼中楼表；comments 长度截到 reply_tail_cap 做代理",
+    }
     c.close()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -188,10 +278,22 @@ FORMS = [
 ]
 def plan(kind: str, board: str | None = None, scene: str | None = None,
          rng: random.Random | None = None) -> dict:
-    """抽一个「这一次该怎么写」的形态：长度段、要不要表情、结尾怎么收。"""
+    """抽一个「这一次该怎么写」的形态：长度段、要不要表情、结尾怎么收。
+
+    长度分位档从 style.json 读（可配置），不写死在代码里。楼中楼没有独立
+    kind 参数（build_reply_prompt 传的是 kind="comment" + 空 board），用
+    _eff_kind 按现有约定识别成 reply，改走更短的分位档，把中位从 17 拉向 13；
+    comment/post 的分位档保持原样。返回的 pl 多带一个 dist_kind，供后处理
+    的确定性归一化挑对应的目标率。公开签名保持不变。
+    """
     rng = rng or random.Random()
-    st = (style().get(kind) or {})
-    bands = st.get("bands") or [{"lo": 8, "hi": 20, "p": 1.0}]
+    eff = _eff_kind({"kind": kind, "board": board or ""})
+    st = (style().get(eff) or style().get(kind) or {})
+    bands = st.get("bands")
+    if not bands:
+        # 兜底也走 config，不在代码里写死区间
+        cuts = (_config().get("length_bands") or {}).get(eff) or [[1, 999]]
+        bands = [{"lo": lo, "hi": hi, "p": 1.0 / len(cuts)} for lo, hi in cuts]
     r, acc = rng.random(), 0.0
     band = bands[-1]
     for b in bands:
@@ -214,6 +316,7 @@ def plan(kind: str, board: str | None = None, scene: str | None = None,
         form = form or ("one", 10, 26)
     return {
         "kind": kind,
+        "dist_kind": eff,          # 新增：给 normalize_dist / dist_targets 用
         "form": form[0] if form else "",
         "lo": int(form[1]) if form else int(band["lo"]),
         "hi": int(form[2]) if form else int(band["hi"]),
@@ -503,11 +606,22 @@ def reaction(scene: str | None, text: str = "", board: str = "",
     pool = _short_pool().get(cat) or []
     if not pool:
         return None
-    seen = set(recent or ())
-    cands = [x for x in pool if x["t"] not in seen]
+    # 旧版 rng.choice + 只按「整句」去重：同一批并行生成的 160 条里「蹲」会
+    # 冒出来好几次（开头重复率 0.15，真人 0.012）。改成：
+    #   1) 按「开头 4 字」避开 recent（口径与评估器 dup_score 的 t[:4] 一致）；
+    #   2) 用帖子正文做稳定 hash 选候选 —— 正文不同就散到不同短句，
+    #      可复现、幂等，既不扎堆「蹲」，也不把手写五六个词刷屏。
+    # recent 为空时回退到 remember() 记下来的开头集合。
+    if recent is None:
+        seen = recent_opener_set()
+    else:
+        seen = {_head4(x) for x in recent if x}
+    cands = [x for x in pool if _head4(x["t"]) not in seen]
     if not cands:
         cands = pool
-    return rng.choice(cands)["t"]
+    key = f"{cat}|{b}|{t}"
+    h = _stable_u01(key, "react")
+    return cands[int(h * len(cands)) % len(cands)]["t"]
 
 
 SHARED = ROOT / "logs" / "recent_shared.jsonl"
@@ -519,7 +633,10 @@ def remember(text: str, acc: str = "") -> None:
     try:
         SHARED.parent.mkdir(parents=True, exist_ok=True)
         with SHARED.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"t": round(time.time()), "a": acc, "x": text[:120]},
+            # 额外记一个 o=开头4字：reaction()/dedup_openers() 按它做开头去重，
+            # 旧行没有 o 时 recent_opener_set() 会从 x 现算，兼容历史数据。
+            f.write(json.dumps({"t": round(time.time()), "a": acc, "x": text[:120],
+                               "o": _head4(text)},
                                ensure_ascii=False) + "\n")
         if SHARED.stat().st_size > 300_000:        # 只留最近 800 条，文件不会无限长
             keep = SHARED.read_text(encoding="utf-8", errors="replace").splitlines()[-800:]
@@ -690,3 +807,225 @@ def repeats(recent: list[str], text: str, thr: float = 0.4) -> bool:
         if inter / min(len(a), len(b)) >= thr:
             return True
     return False
+
+
+# ================================================================= 确定性分布归一化
+# 供 tasks.postprocess_text 这条「后处理统一入口」调用：输入一段文本 + plan，
+# 输出修正后的文本。所有判断走稳定 hash(md5)，跨进程可复现、对同一输入幂等。
+# 只动末尾表情 token 与 >25 字长文本的句号；短文本的字/标点/换行一律不动。
+# 目标率、长度阈值全部从 kb/style.json 的 config.dist_target 读，不写死在代码里。
+
+_TRAIL_STRIP = "，,、；;：:。 \t"      # 不含 ？！，问句/感叹句要留着判断
+
+# 旧 ensure_sticker 在 pl.sticker=True 时追加的是一个「不带方括号」的表情名
+# （human._pick_sticker 返回裸名），评估器认不出、还会变成句子末尾的野词。
+# 归一化前把它摘掉（只在 pl.sticker=True 时，且后面至少还剩 2 字），避免污染词核。
+_BARE_STICK_TAIL = re.compile(
+    r"(?:" + "|".join(re.escape(n) for n in sorted(STICKERS, key=len, reverse=True))
+    + r")[\s。]*$")
+
+
+def _strip_appended_bare_sticker(t: str) -> str:
+    m = _BARE_STICK_TAIL.search(t)
+    if not m or len(t[:m.start()].strip()) < 2:
+        return t
+    return t[:m.start()].rstrip(_TRAIL_STRIP).rstrip()
+
+
+def _stable_u01(s: str, salt: str = "") -> float:
+    """稳定 hash -> [0,1)。不用内置 hash()：它带进程随机盐，跨进程不可复现。"""
+    h = hashlib.md5((salt + "\x1f" + s).encode("utf-8")).hexdigest()[:8]
+    return int(h, 16) / 0xFFFFFFFF
+
+
+def _eff_kind(pl: dict | None, kind: str | None = None) -> str:
+    """判定这段文本属于哪种分布口径。
+
+    现有约定：build_reply_prompt 用 kind="comment" + 空 board 表示楼中楼；
+    build_comment_prompt 的 board 是真实板块（非空）。评估器 _postprocess 会
+    显式传 kind，优先信任它；没传时按 plan 的 dist_kind / board 回退。
+    """
+    if kind:
+        return kind
+    pl = pl or {}
+    k = pl.get("dist_kind") or pl.get("kind") or "comment"
+    if k == "comment" and not (pl.get("board") or ""):
+        return "reply"
+    return k
+
+
+def dist_targets(kind: str = "comment") -> dict:
+    """读 style.json config.dist_target 的归一化目标（带兜底）。
+
+    主代理接线后想调表情/句号目标率，直接改 kb/style.json 即可，不用改代码。
+    """
+    cfg = _config().get("dist_target") or {}
+    d = dict(_DEFAULT_CONFIG["dist_target"].get(kind) or {})
+    d.update(cfg.get(kind) or {})
+    return d
+
+
+def _canonical(t: str) -> str:
+    """把文本清成稳定「核」，供 hash 取样与长文本重建。
+
+    末尾/句中表情先摘出（评估器统计「含表情/含句号」，不能被表情挡住），
+    再把句号合并成逗号、折叠换行、去尾标点。核里不含 [] 表情与 。，因此
+    补/删表情或句号后重算核结果不变 —— 这是幂等的关键。
+    """
+    x = (t or "").replace("．", "。")
+    x = STICKER_RE.sub("", x)                       # 末尾表情先摘出再处理
+    x = x.replace("\r", " ").replace("\n", " ")
+    x = re.sub(r"\s+", " ", x).strip()
+    x = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "，", x)
+    parts = [p.strip() for p in x.split("。") if p.strip()]
+    x = "，".join(parts)
+    return x.rstrip(_TRAIL_STRIP).rstrip()
+
+
+def _drop_stickers(t: str) -> str:
+    """摘掉所有 [xxx] 表情，清掉因此留下的孤立尾逗号/空格。"""
+    x = STICKER_RE.sub("", t)
+    x = re.sub(r"[ \t]{2,}", " ", x)
+    return x.rstrip(_TRAIL_STRIP).rstrip()
+
+
+def _sticker_token(core: str, scene: str = "") -> str:
+    """按稳定 hash 选一个白名单内、极性不别扭的表情名，返回带方括号的 token。"""
+    pol = polarity(core)
+    pool = list(SCENE_STICKER.get(scene or "", SCENE_STICKER[""]))
+    if pol < 0:
+        pool = [s for s in pool if s in NEG_STICKERS] or ["流泪", "无语", "晕了"]
+    elif pol > 0:
+        pool = [s for s in pool if s in POS_STICKERS] or list(SCENE_STICKER[""])
+    name = pool[int(_stable_u01(core, "stk_name") * len(pool)) % len(pool)]
+    return f"[{name}]"
+
+
+def normalize_dist(text: str, pl: dict, kind: str | None = None,
+                   scene: str = "") -> str:
+    """确定性分布归一化：表情率、>25 字句号率、换行率，一步收口。
+
+    供 tasks.postprocess_text 作为「后处理统一入口」的最后一环调用，例如：
+        def postprocess_text(txt, kind, plan, scene=""):
+            ...                       # erase_hedges / trim_periods 等
+            return human.normalize_dist(txt, plan, kind, scene)
+
+    规则（全部按稳定 hash，幂等、可复现）：
+      * 表情：按 hash 精确「补 / 删」到目标率（comment 0.25 / reply 0.28）。
+        不是只补不删 —— hash 判定不该带的，现有表情一律摘掉；这直接修掉
+        上一轮把 reply 表情率叠到 0.42 的负优化。
+      * 句号：仅对 >25 字文本按 hash 归一化到 comment 0.21 / reply 0.06；
+        末尾表情先摘出再处理；问句/感叹句不硬塞句号。
+      * 换行：只在确有换行时折叠，保持换行率≈0。
+      * 短文本（<= short_keep 字）：一个字都不改，最多只在末尾补/摘一个
+        表情 token（可逆、幂等），绝不塞句号、不动正文。
+
+    返回修正后的文本；post 或未配置的 kind 原样返回。公开签名：新增函数。
+    """
+    pl = pl or {}
+    eff = _eff_kind(pl, kind)
+    tgt = dist_targets(eff)
+    if not tgt.get("enabled"):
+        return text
+    t = (text or "").strip()
+    if not t:
+        return t
+    # 兼容旧链：ensure_sticker 追加的裸表情名 + fix_period_rate 补的句号先摘掉，
+    # 再由本函数统一按 hash 重新决定表情/句号，避免两套逻辑叠加。
+    if pl.get("sticker"):
+        t = _strip_appended_bare_sticker(t)
+    core = _canonical(t)
+    if not core:
+        return t                                # 整条就是表情/空，别动
+
+    want_stk = _stable_u01(core, "sticker") < float(tgt["sticker"])
+    sc = scene or ((pl or {}).get("scene") or "")
+    token = _sticker_token(core, sc) if want_stk else ""
+    long_min = int(tgt["long_min"])
+    short_keep = int(tgt["short_keep"])
+
+    if len(core) <= short_keep:
+        # 真·短文本：正文一个字不动，只在末尾补/摘一个表情 token
+        if want_stk:
+            out = t if STICKER_RE.search(t) else t.rstrip(_TRAIL_STRIP) + token
+        else:
+            out = _drop_stickers(t)
+    else:
+        # 中长文本一律用核重建：输出长度 == len(core) + (句号?1:0) + len(token)，
+        # 与评估器「len>25 才进句号率分母」的口径严格对齐，不会出现半截漏网。
+        body = core
+        est = len(core) + len(token)
+        if est > long_min and not core.endswith(("？", "！", "?", "!")):
+            want_per = _stable_u01(core, "period") < float(tgt["period_long"])
+            body = core + ("。" if want_per else "")
+        out = body + token
+
+    # 换行率≈0：只在确有换行时折叠（短文本平时不含换行，不受影响）
+    if "\n" in out or "\r" in out:
+        out = re.sub(r"\s*[\r\n]+\s*", "", out)
+    return out
+
+
+def normalize_distribution(text: str, kind: str, pl: dict | None = None,
+                           scene: str = "") -> str:
+    """兼容入口：tasks.postprocess_text 用 fn(t, kind, plan) 三参调用。
+
+    名字取自它探测的候选名之一；内部转成 normalize_dist 的 (text, pl, kind)。
+    主代理也可直接把 postprocess_text 末尾改成
+        return human.normalize_dist(t, plan, kind, scene)
+    两者等价，且都幂等。
+    """
+    return normalize_dist(text, pl or {}, kind, scene)
+
+
+# ---------------------------------------------------------------- 开头去重（task3）
+def _head4(t: str) -> str:
+    """开头 4 字，口径与评估器 dup_score 的 t[:4] 完全一致。"""
+    return (t or "")[:4]
+
+
+def recent_opener_set(n: int = 120) -> set[str]:
+    """读最近记录的开头 4 字集合（旧行没有 o 就从 x 现算），供短回复去重。"""
+    out: set[str] = set()
+    try:
+        lines = SHARED.read_text(encoding="utf-8", errors="replace").splitlines()[-n:]
+        for ln in lines:
+            try:
+                d = json.loads(ln)
+                out.add(d.get("o") or _head4(d.get("x") or ""))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    out.discard("")
+    return out
+
+
+def dedup_openers(texts: list[str], recent: list[str] | None = None) -> list[str]:
+    """批级开头去重（可选接线）：把短文本的开头重复率往 0 压。
+
+    只替换「短文本 + 开头撞车」的条目：从真实短句池(kb/short_replies.json)
+    按稳定 hash 换一条开头没用过的真句；长文本一个字不动（改写会生硬）。
+    幂等：第二次跑时开头已不撞车，输出不变。
+    """
+    if recent is None:
+        used = recent_opener_set()
+    else:
+        used = {_head4(x) for x in recent if x}
+    out: list[str] = []
+    for i, t in enumerate(texts):
+        t = t or ""
+        if not t.strip():
+            out.append(t)
+            continue
+        head = _head4(t)
+        if head and head in used and len(t) <= 10:
+            pool = _short_pool()
+            allshort = [x["t"] for cat in pool.values() for x in cat]
+            cands = [x for x in allshort if _head4(x) not in used]
+            if cands:
+                h = _stable_u01(f"{i}|{t}", "dedup")
+                t = cands[int(h * len(cands)) % len(cands)]
+        used.add(_head4(t))
+        out.append(t)
+    return out

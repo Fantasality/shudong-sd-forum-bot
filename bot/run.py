@@ -32,7 +32,8 @@ sys.path.insert(0, str(BASE))
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-from szlike import ops, persona, sentinel as sentinel_mod, whisper as whisper_mod  # noqa: E402
+from szlike import (ops, persona, profile_gate, sentinel as sentinel_mod,  # noqa: E402
+                    whisper as whisper_mod)
 from szlike.brain import Brain                         # noqa: E402
 from szlike.client import Client, SzlikeError, jwt_payload  # noqa: E402
 from szlike.config import (                            # noqa: E402
@@ -395,6 +396,49 @@ class AccountWorker(threading.Thread):
                 ctx = Ctx(self._client, self._store, self._brain, guard, d, manual=False)
 
                 now = time.time()
+
+                # 账号画像门禁：真人第一条指纹就是「都是默认 id 头像」。
+                # 实测 33/33 个号 profile 全为 null，没设昵称的号一律不准上线。
+                # 每小时查一次即可，别每轮都打 viewer。
+                beh = cfg.get("behavior") or {}
+                if beh.get("enabled", True) and beh.get("require_custom_nickname"):
+                    if now - getattr(self, "_last_profile_check", 0) > 3600:
+                        self._last_profile_check = now
+                        ready, why = profile_gate.check(self._client)
+                        if not ready:
+                            self._beat("blocked", why)
+                            log.warning("[%s] 账号画像门禁：%s", self.acct, why)
+                            self.stop_evt.wait(300)
+                            continue
+
+                # 在线 L3 自检：最近 24h 出现「同帖多号」就静默。
+                # 5 分钟爆发只记观察、不阻断：真人 48 条窗口 burst5_max 的 p90=6
+                # （tools/graph_baseline.json 实测），几个号短时同时出现本身不是破绽。
+                # 离线评估通过不等于运行时安全 —— 这是最后一道兜底，
+                # 也是 2026-11-05 被真人翻两屏识破后补上的那一层。
+                if beh.get("live_graph_gate"):
+                    if now - getattr(self, "_last_graph_check", 0) > 600:
+                        self._last_graph_check = now
+                        try:
+                            from szlike import grapheval as _ge
+                            acts = [a for a in _ge.load_actions(str(STATE_PATH))
+                                    if a["ts"] >= now - 86400
+                                    and a["kind"] in ("comment", "reply")]
+                            m = _ge.metrics(acts)
+                            if m["burst5_max"] > 3:
+                                log.warning("[%s] 图谱观察：5 分钟内 %s 个号"
+                                            "（真人 p90=6，非阻断项）",
+                                            self.acct, m["burst5_max"])
+                            # 唯一不可妥协的是我们自己定的永久单 owner 策略
+                            if m["accounts_per_post_max"] > 1:
+                                why = (f"图谱自检未过：同帖最多 "
+                                       f"{m['accounts_per_post_max']} 个号")
+                                self._beat("blocked", why)
+                                log.warning("[%s] %s", self.acct, why)
+                                self.stop_evt.wait(300)
+                                continue
+                        except Exception as e:
+                            log.warning("[%s] 图谱自检异常（放行但记账）：%s", self.acct, e)
 
                 # 暗语通道：被「先歇会儿」按住时整个号静默
                 if whisper_mod.is_paused(self.acct):
