@@ -37,6 +37,7 @@ import re
 import sqlite3
 import statistics
 import sys
+import threading
 import time
 import zlib
 from collections import Counter, defaultdict
@@ -64,6 +65,65 @@ _SEED = EVAL_SEED
 # 候选重排开关：默认 1（关闭，与旧版行为完全一致）。
 # 设 2/3 时同一条生成多个候选，交给 szlike/rerank.py 的确定性人味打分挑选。
 CANDIDATES = max(1, int(os.environ.get("EVAL_CANDIDATES", "1")))
+
+# 第三方网关常撑不住 8 并发 / 大 max_tokens / 25s×2 重试。
+# 默认仍是 8（不改变现有行为），临时模型考试时可用 SZLIKE_LLM_WORKERS=2 降并发。
+WORKERS = max(1, int(os.environ.get("SZLIKE_LLM_WORKERS", "8")))
+
+# 逐题答卷：eval_last.json 只存 samples 前 10-12 条，导不出完整答卷。
+# 这里按题记录「试卷题目 / 人类标准答案 / AI 答案 / 图灵判定」，
+# main() 结束时写 tools/exam_answers.json，供 WebUI 导出。
+# 绝不含 api_key 或账号凭据。
+_ANSWERS: list[dict] = []
+ANSWERS_OUT = HERE / "exam_answers.json"
+
+# 旧版把「图灵裁判调用失败」当成「没被抓」：b.chat() 返回 None（限流/超时/
+# 网关故障）或抛异常时 return False，生成失败率守卫又只看生成、不看裁判。
+# 实测 62 次 429 曾把 reply 图灵分推到 37.4/40、总分 90.3，全是假分。
+# 用独立哨兵区分：None=无效样本（参照不足/裁判没给有效序号），
+# _JUDGE_FAIL=裁判调用失败（必须剔除并计入失败率守卫）。
+_JUDGE_FAIL = "JUDGE_FAIL"
+
+# 以后的答卷要显示「发给模型的原输入」，便于调试向量检索。
+# 默认关闭；SZLIKE_EXAM_RECORD_INPUT=1 开启后写进逐题答卷的 model_input。
+# 本次入仓的两份答卷不含该字段（用户明确说「这次就算了」）。
+RECORD_INPUT = os.environ.get("SZLIKE_EXAM_RECORD_INPUT") == "1"
+_INPUT_LOG: dict[str, dict] = {}
+_INPUT_LOCK = threading.Lock()
+
+
+def _note_input(system, user, raw, cleaned) -> None:
+    """生成结束时登记本次 system/user；key 同时挂原始输出与清洗后文本。"""
+    if not RECORD_INPUT:
+        return
+    p = {"system": system or "", "user": user or ""}
+    with _INPUT_LOCK:
+        if raw:
+            _INPUT_LOG[raw] = p
+        if cleaned:
+            _INPUT_LOG[cleaned] = p
+
+
+def _model_input_field(text) -> dict:
+    if not RECORD_INPUT or not text:
+        return {}
+    with _INPUT_LOCK:
+        p = _INPUT_LOG.get(text)
+    return {"model_input": p} if p else {}
+
+
+def _safe_base_url(url: str) -> str:
+    """答卷不暴露临时接入的第三方网关地址。
+
+    用户要求：只展示 DeepSeek 与 Gemini 两套模型的答卷，README 给引用，
+    但不得暴露临时网关地址。模型名照常保留，便于两套答卷对照。
+    """
+    u = url or ""
+    if "api.deepseek.com" in u:
+        return "https://api.deepseek.com/v1"
+    if not u:
+        return ""
+    return "third-party OpenAI-compatible gateway (redacted)"
 
 # 按类型选择性重排，依据 2026-11-06 固定考卷 A/B（c1 vs c3）：
 #   post   80.0 -> 88.4（被抓 21.7% -> 15.0%）   收益 +8.4
@@ -179,8 +239,12 @@ _JUDGE_SYS = (
 
 
 def turing_case(b: brain_mod.Brain, post: str, real: list[str],
-                fake: str, rng: random.Random) -> bool:
-    """返回 True 表示 AI 被抓出来了。"""
+                fake: str, rng: random.Random) -> bool | None | str:
+    """True=被抓；False=没被抓；None=无效样本须剔除；_JUDGE_FAIL=裁判调用失败。
+
+    旧版在 b.chat() 返回 None 或抛异常时 return False，等于把「裁判挂了」
+    计成「没被抓」，限流时凭空推高图灵分。现在三种失败各归各位。
+    """
     pool = [r for r in real if r.strip() and r.strip() != fake.strip()]
     rng.shuffle(pool)
     picks = pool[:4]
@@ -192,11 +256,15 @@ def turing_case(b: brain_mod.Brain, post: str, real: list[str],
     body = "\n".join(f"{i+1}. {t[:120]}" for i, t in enumerate(items))
     user = f"【帖子】{post[:300]}\n\n【评论】\n{body}\n\n哪一条是机器写的？只回答序号。"
     try:
-        out = (b.chat(_JUDGE_SYS, user, max_tokens=8) or "").strip()
-        m = re.search(r"[1-5]", out)
-        return bool(m) and int(m.group()) == fake_idx
+        raw = b.chat(_JUDGE_SYS, user, max_tokens=8)
     except Exception:
-        return False
+        return _JUDGE_FAIL
+    if raw is None:
+        return _JUDGE_FAIL
+    m = re.search(r"[1-5]", (raw or "").strip())
+    if not m:
+        return None          # 裁判没给有效序号，同样按无效样本剔除
+    return int(m.group()) == fake_idx
 
 
 # ---------------------------------------------------------------- 生成
@@ -249,6 +317,7 @@ def gen_comment(ctx, post: str, board: str, prev: list[str]) -> str | None:
         except Exception:
             pass
         _fact_check(txt, getattr(ctx, "campus", "") or "")
+    _note_input(r["system"], r["user"], raw, txt)
     return txt
 
 
@@ -302,9 +371,11 @@ def gen_post(ctx, board: str = "", topic_hint: str = "") -> str | None:
         try:
             out = fn(txt, "post", pl, "")
             if isinstance(out, str) and out.strip():
+                _note_input(system, user, raw, out)
                 return out
         except Exception:
             pass
+    _note_input(system, user, raw, txt)
     return txt
 
 
@@ -444,7 +515,7 @@ def run_comment(cfg: dict, cases: list[dict], b, n: int, rng) -> dict:
         return gen_comment(ctx, c["post"], c["board"], prev)
 
     t0 = time.time()
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         gens = list(ex.map(work, jobs))
     gen_time = time.time() - t0
 
@@ -469,14 +540,33 @@ def run_comment(cfg: dict, cases: list[dict], b, n: int, rng) -> dict:
         return [turing_case(b, post, real_txt, fake, _stable_rng(fake, k))
                 for k in range(2)]
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         verdicts = list(ex.map(_judge_twice, pairs))
-    flat = [x for v in verdicts for x in v if x is not None]
+    all_v = [x for v in verdicts for x in v]
+    jf = sum(1 for x in all_v if x == _JUDGE_FAIL)
+    if all_v and jf / len(all_v) > 0.30:
+        raise SystemExit(
+            f"图灵裁判失败率过高 {jf}/{len(all_v)}（>30%）：可能是限流/超时/网关故障。"
+            "裁判失败不能算「没被抓」，拒绝输出虚高的图灵分。")
+    if jf:
+        print(f"  [!] 图灵裁判失败 {jf} 次，已剔除且不计入分母", flush=True)
+    flat = [x for x in all_v if isinstance(x, bool)]
     caught_n = sum(1 for x in flat if x)
     total_n = len(flat)
     catch_rate = caught_n / max(1, total_n)
     turing = _pct(1 - catch_rate) * 40
     print(f"  图灵：{caught_n}/{total_n} 次被判（{catch_rate*100:.0f}%），用时 {time.time()-t0:.0f}s")
+
+    for (c, ai), vs in zip(pairs, verdicts):
+        ok = [x for x in vs if x is not None]
+        _ANSWERS.append({
+            "mode": "comment", "board": c.get("board") or "",
+            "question": c.get("post") or "",
+            "human_answers": [x.get("text", "") for x in (c.get("real_comments") or [])],
+            "ai_answer": ai,
+            **_model_input_field(ai),
+            "turing_votes": len(ok), "turing_caught": sum(1 for x in ok if x),
+        })
 
     ds, ddet = dist_score(texts, ref)
     dup, dupdet = dup_score(texts)
@@ -514,7 +604,7 @@ def run_post(cfg: dict, b, n: int, rng) -> dict:
         jobs.append((ctx, boards[i % len(boards)]))
 
     t0 = time.time()
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         gens = list(ex.map(lambda j: gen_post(j[0], j[1]), jobs))
     texts = [g for g in gens if g]
     print(f"  生成 {len(texts)}/{n} 条帖子，用时 {time.time()-t0:.0f}s")
@@ -529,14 +619,34 @@ def run_post(cfg: dict, b, n: int, rng) -> dict:
                             _stable_rng(t, k))
                 for k in range(2)]
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         verdicts = list(ex.map(_judge_twice, texts))
-    flat = [x for v in verdicts for x in v if x is not None]
+    all_v = [x for v in verdicts for x in v]
+    jf = sum(1 for x in all_v if x == _JUDGE_FAIL)
+    if all_v and jf / len(all_v) > 0.30:
+        raise SystemExit(
+            f"图灵裁判失败率过高 {jf}/{len(all_v)}（>30%）：可能是限流/超时/网关故障。"
+            "裁判失败不能算「没被抓」，拒绝输出虚高的图灵分。")
+    if jf:
+        print(f"  [!] 图灵裁判失败 {jf} 次，已剔除且不计入分母", flush=True)
+    flat = [x for x in all_v if isinstance(x, bool)]
     caught_n = sum(1 for x in flat if x)
     total_n = len(flat)
     catch_rate = caught_n / max(1, total_n)
     turing = _pct(1 - catch_rate) * 40
     print(f"  图灵：{caught_n}/{total_n} 次被判（{catch_rate*100:.0f}%）")
+
+    for ai, vs in zip(texts, verdicts):
+        ok = [x for x in vs if x is not None]
+        _ANSWERS.append({
+            "mode": "post", "board": "",
+            "question": "（开放式发帖：按抽到的真实话题写一条帖子）",
+            "human_answers": ref_posts[:4],
+            "human_answers_kind": "reference_posts（真实帖子，作为风格参照而非唯一标准答案）",
+            "ai_answer": ai,
+            **_model_input_field(ai),
+            "turing_votes": len(ok), "turing_caught": sum(1 for x in ok if x),
+        })
 
     td, tdet = topic_dist_score(texts, ref_posts)
 
@@ -608,10 +718,11 @@ def run_reply(cfg: dict, b, n: int, rng) -> dict:
         txt = tasks_mod._clean_content(raw or "", lo=2, hi=max(40, r["plan"]["hi"] * 2))
         if txt:
             txt = _postprocess(txt, "reply", r["plan"], r.get("scene") or "")
+        _note_input(r["system"], r["user"], raw, txt)
         return txt
 
     t0 = time.time()
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         gens = list(ex.map(work, jobs))
     pairs = [(c, g) for (c, _), g in zip(jobs, gens) if g]
     texts = [g for _, g in pairs]
@@ -629,14 +740,34 @@ def run_reply(cfg: dict, b, n: int, rng) -> dict:
         return [turing_case(b, c["post"], pool, fake, _stable_rng(fake, k))
                 for k in range(2)]
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         verdicts = list(ex.map(_judge_twice, pairs))
-    flat = [x for v in verdicts for x in v if x is not None]
+    all_v = [x for v in verdicts for x in v]
+    jf = sum(1 for x in all_v if x == _JUDGE_FAIL)
+    if all_v and jf / len(all_v) > 0.30:
+        raise SystemExit(
+            f"图灵裁判失败率过高 {jf}/{len(all_v)}（>30%）：可能是限流/超时/网关故障。"
+            "裁判失败不能算「没被抓」，拒绝输出虚高的图灵分。")
+    if jf:
+        print(f"  [!] 图灵裁判失败 {jf} 次，已剔除且不计入分母", flush=True)
+    flat = [x for x in all_v if isinstance(x, bool)]
     caught_n = sum(1 for x in flat if x)
     total_n = len(flat)
     catch_rate = caught_n / max(1, total_n)
     turing = _pct(1 - catch_rate) * 40
     print(f"  图灵：{caught_n}/{total_n} 次被判（{catch_rate*100:.0f}%）")
+
+    for (c, ai), vs in zip(pairs, verdicts):
+        ok = [x for x in vs if x is not None]
+        _ANSWERS.append({
+            "mode": "reply", "board": c.get("board") or "",
+            "question": c.get("post") or "",
+            "their": c.get("their") or "",
+            "human_answers": list(c.get("real_replies") or []),
+            "ai_answer": ai,
+            **_model_input_field(ai),
+            "turing_votes": len(ok), "turing_caught": sum(1 for x in ok if x),
+        })
 
     ref = [x for c in cases for x in (c.get("real_replies") or [])]
     ds, ddet = dist_score(texts, ref)
@@ -656,6 +787,7 @@ def run_reply(cfg: dict, b, n: int, rng) -> dict:
 
 def main() -> None:
     global _SEED, CANDIDATES
+    _ANSWERS.clear()
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["comment", "post", "reply", "both", "all"], default="all")
     ap.add_argument("--n", type=int, default=0, help="样本数，0=用测试集全部")
@@ -668,7 +800,22 @@ def main() -> None:
     CANDIDATES = max(1, args.candidates)
 
     cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
-    b = brain_mod.Brain(cfg.get("llm"))
+    # 临时换模型考试：三个环境变量覆盖当前 llm 配置，绝不写回 config.json。
+    # key 只存在于进程内存，不落盘、不打印、不进结果 JSON。
+    # 供 WebUI「一键测试当前模型」和命令行临时 A/B 共用。
+    llm = dict(cfg.get("llm") or {})
+    for _env, _key in (("SZLIKE_LLM_BASE", "base_url"),
+                       ("SZLIKE_LLM_KEY", "api_key"),
+                       ("SZLIKE_LLM_MODEL", "model"),
+                       ("SZLIKE_LLM_TIMEOUT", "timeout"),
+                       ("SZLIKE_LLM_RETRIES", "retries")):
+        _val = os.environ.get(_env)
+        if _val:
+            llm[_key] = _val
+    if os.environ.get("SZLIKE_LLM_BASE") or os.environ.get("SZLIKE_LLM_KEY"):
+        print(f"  [临时模型] {llm.get('model')} @ {llm.get('base_url')}（key 不显示）",
+              flush=True)
+    b = brain_mod.Brain(llm)
     data = json.loads(TESTSET.read_text(encoding="utf-8"))
     cases = data["cases"]
     rng = random.Random(args.seed)
@@ -713,7 +860,16 @@ def main() -> None:
             print(f"      {s[:70]}")
 
     OUT.write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
+    # 逐题答卷单独落盘：只记模型名与 base_url，不记 api_key
+    ANSWERS_OUT.write_text(json.dumps({
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "seed": _SEED, "candidates": CANDIDATES,
+        "model": llm.get("model", ""),
+        "base_url": _safe_base_url(llm.get("base_url", "")),
+        "n": len(_ANSWERS), "answers": _ANSWERS,
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"\n结果已写入 {OUT}")
+    print(f"逐题答卷已写入 {ANSWERS_OUT}（{len(_ANSWERS)} 题）")
 
 
 if __name__ == "__main__":

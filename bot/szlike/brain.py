@@ -51,11 +51,18 @@ class Brain:
         self.api_key = cfg.get("api_key") or ""
         self.model = cfg.get("model") or "deepseek-chat"
         self.timeout = float(cfg.get("timeout") or 25)
+        # 重试次数可配：默认 1 次重试（共 2 次），与旧行为一致。
+        # 慢网关可设 retries=0，避免单次失败烧掉 2×timeout。
+        self.retries = max(0, int(cfg.get("retries", 1)))
         self.temperature = float(cfg.get("temperature") or 0.9)
         self.max_tokens = int(cfg.get("max_tokens") or 160)
         # 思考模式会占用 max_tokens，把几十字的短帖截断在半句上；社交文本不需要思考
         self.thinking = bool(cfg.get("thinking", False))
         self.enabled = bool(self.api_key)
+        # 第三方 OpenAI 兼容网关常把未知的 thinking 字段当成 400。
+        # 非 deepseek 域名自动进兼容模式，只在 _post 里剥掉该字段，
+        # DeepSeek 原样不变。可用 cfg["compat"] 显式覆盖。
+        self.compat = bool(cfg.get("compat", "deepseek" not in self.base_url))
         self._local = threading.local()
         u = urlsplit(self.base_url)
         self._https = u.scheme != "http"
@@ -86,6 +93,8 @@ class Brain:
         self._local.conn = None
 
     def _post(self, payload: dict) -> dict:
+        if self.compat:
+            payload = {k: v for k, v in payload.items() if k != "thinking"}
         body = json.dumps(payload).encode()
         path = f"{self._prefix}/chat/completions"
         headers = {
@@ -95,7 +104,7 @@ class Brain:
             "connection": "keep-alive",
         }
         last = None
-        for attempt in (0, 1):
+        for attempt in range(1 + self.retries):
             try:
                 c = self._conn()
                 c.request("POST", path, body=body, headers=headers)

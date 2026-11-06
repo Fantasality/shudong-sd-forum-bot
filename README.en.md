@@ -341,3 +341,63 @@ plus dedicated suites for AI-accusation replies and full thread context.
 | Online release gate | 2 manual blockers | **NOT CLEARED** — do not start the daemon |
 
 The full auto-generated tables (L1 breakdown, five-way Turing comparison, human-baseline calibration, scenario suites, corpus inventory) are in [the Chinese README](README.md), section 十一.
+
+---
+
+## WebUI exam & two model answer sheets
+
+### The Exam tab
+
+A new **Exam** entry in the console sidebar runs the L1 human-likeness test with one click:
+pick a mode (comment / post / reply / all), sample count and candidate count, optionally
+supply a temporary model (the API key uses a password field, is never echoed, never stored
+in localStorage, and only reaches the subprocess through server memory). A background
+worker streams progress, then shows the score table and a question-by-question comparison.
+The answer sheet and exam paper can be exported.
+
+| Export file | Contents |
+|---|---|
+| `试卷.json` | Questions (real post text) + human reference answers (real human comments) |
+| `答卷.json` | AI answers + per-question Turing verdicts + aggregate scores |
+| `对比.csv` | Per question: no. / mode / question / human answers / AI answer / caught |
+| `成绩单.md` | Summary tables + Turing comparison + side-by-side answers |
+| `说明.txt` | Field and methodology notes |
+
+> Open-ended post generation has no single correct answer; `试卷.json` supplies real posts as
+> **style references**, explicitly labelled as such. All exports strip API keys, account
+> credentials and third-party gateway addresses; only model names are kept.
+
+**Future answer sheets include the raw model input**: set `SZLIKE_EXAM_RECORD_INPUT=1`
+before an exam and each answer gains a `model_input` field (the exact system / user prompts
+sent to the model), exported as an extra column — useful for debugging vector retrieval and
+RAG injection. The two sample sheets in this repo were generated with the switch off.
+
+### Two full answer sheets (same fixed exam, `EVAL_SEED=20261105`, 260 items each)
+
+| Model | Full per-question sheet | Items |
+|---|---|---|
+| DeepSeek `deepseek-chat` | [答卷_deepseek.json](docs/exams/答卷_deepseek.json) | 260 |
+| Gemini `gemini-2.5-flash-lite` | [答卷_gemini.json](docs/exams/答卷_gemini.json) | 260 |
+
+[Side-by-side preview (first 15 questions)](docs/exams/对比预览.md)
+
+Sheets contain real forum posts and real human comments as questions and reference answers.
+**Third-party gateway addresses are redacted**; only model names remain.
+
+### L1 score comparison (measured; do not read a single round)
+
+| Round | comment | post | reply | mean | Note |
+|---|---|---|---|---|---|
+| DeepSeek fixed baseline | 83.6 | 80.0 | 79.3 | 81.0 | c1 |
+| DeepSeek Round3 | 78.6 | 86.7 | 82.5 | 82.6 | c3 |
+| DeepSeek best Best-of-3 | 80.3 | 88.4 | 86.2 | 85.0 | c3 |
+| Gemini c1 (8 workers) | 83.5 | 80.7 | 86.5 | 83.6 | clean |
+| Gemini c1 (2 workers, cleanest) | 86.7 | 85.9 | 89.3 | 87.3 | no 4xx, no generation failures |
+| Gemini c3 | 81.2 | 84.9 | ~~90.3~~ | — | **reply polluted by 62 rate-limit errors; not usable** |
+
+Caveats: swapping the model also swaps the Turing judge (generation and judging share one
+Brain), so score differences cannot be attributed purely to generation quality; Gemini's
+fact accuracy was 92% vs DeepSeek's 99.1-100%; same-model round-to-round variance is about
+3.7 points. A judge-failure bug that silently counted failed calls as not caught (inflating
+Turing scores under rate limiting) has been fixed with a dedicated sentinel and a
+judge-side failure-rate guard.

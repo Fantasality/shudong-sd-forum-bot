@@ -228,6 +228,39 @@
   .acct-pick label{font-size:12px;color:var(--dim)}
   .acct-pick select{width:auto;min-width:180px;padding:5px 8px}
   .acct-pick .grow{margin-left:auto;font-size:11.5px;color:var(--dim2)}
+  /* 考试页 */
+  .exam-bar-wrap{height:8px;border-radius:6px;background:#242b38;overflow:hidden;margin-top:10px}
+  .exam-bar-wrap > i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:6px;transition:.35s}
+  .exam-log{background:#070910;border:1px solid var(--line);border-radius:9px;padding:10px 12px;margin-top:10px;
+    font-family:var(--mono);font-size:11.5px;line-height:1.65;color:var(--dim);max-height:150px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+  .exam-scores{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-bottom:6px}
+  .exam-score{background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:13px 15px}
+  .exam-score .h{display:flex;align-items:baseline;gap:8px}
+  .exam-score .h b{font-size:13px;font-weight:650;letter-spacing:.03em}
+  .exam-score .tot{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;color:#c4b5fd}
+  .exam-score .tot small{font-size:12px;color:var(--dim2);font-weight:500}
+  .exam-score .grid{display:grid;grid-template-columns:1fr 1fr;gap:3px 12px;margin-top:9px;font-size:12px;color:var(--dim)}
+  .exam-score .grid span b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+  .exam-score .caught{display:inline-block;margin-top:9px;font-size:11.5px;padding:2px 9px;border-radius:999px;
+    background:rgba(61,220,151,.12);color:var(--ok);border:1px solid rgba(61,220,151,.28)}
+  .exam-score .caught.warn{background:rgba(245,185,92,.12);color:var(--warn);border-color:rgba(245,185,92,.3)}
+  .exam-score .caught.bad{background:rgba(248,113,113,.12);color:var(--bad);border-color:rgba(248,113,113,.3)}
+  table.exam-tb{width:100%;border-collapse:collapse;font-size:12.5px}
+  table.exam-tb th,table.exam-tb td{border-bottom:1px solid var(--line);padding:9px 10px;text-align:left;vertical-align:top}
+  table.exam-tb th{color:var(--dim);font-weight:600;font-size:11.5px;letter-spacing:.03em;position:sticky;top:0;background:var(--panel);z-index:1}
+  table.exam-tb td{line-height:1.55;word-break:break-word}
+  table.exam-tb tr:last-child td{border-bottom:none}
+  .exam-qid{font-family:var(--mono);color:var(--dim2);white-space:nowrap}
+  .exam-mode{font-size:11px;padding:1px 7px;border-radius:999px;background:rgba(139,92,246,.14);color:#c4b5fd;white-space:nowrap}
+  .exam-mode.post{background:rgba(34,211,238,.12);color:var(--accent2)}
+  .exam-mode.reply{background:rgba(245,185,92,.12);color:var(--warn)}
+  .exam-human{color:var(--ok)}
+  .exam-ai{color:var(--text)}
+  .exam-na{color:var(--dim2)}
+  .exam-cmp-wrap{max-height:520px;overflow:auto;border:1px solid var(--line);border-radius:11px}
+  .exam-cell-scroll{max-height:120px;overflow:auto;white-space:pre-wrap}
+  .exam-export{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .exam-note{font-size:12px;color:var(--dim2);line-height:1.7}
   /* 滚动条 */
   ::-webkit-scrollbar{width:9px;height:9px}
   ::-webkit-scrollbar-thumb{background:#2a3140;border-radius:5px;border:2px solid var(--bg2)}
@@ -271,6 +304,7 @@
   <div class="nav-item" data-tab="tasks"><span class="ic">⚙</span>任务与 Prompt</div>
   <div class="nav-item" data-tab="content"><span class="ic">☰</span>我的内容</div>
   <div class="nav-item" data-tab="debug"><span class="ic">⚡</span>调试台</div>
+  <div class="nav-item" data-tab="exam"><span class="ic">✎</span>考试</div>
   <div class="nav-item" data-tab="kb"><span class="ic">✦</span>知识库</div>
   <div class="nav-item" data-tab="sync"><span class="ic">⇄</span>手机同步</div>
   <div class="nav-item" data-tab="logs"><span class="ic">▤</span>日志</div>
@@ -578,6 +612,108 @@
     </div>
   </section>
 
+  <!-- ========== 考试 ========== -->
+  <section class="page" id="page-exam">
+    <div class="page-head">
+      <h2>考试</h2>
+      <span class="hint">一键测试当前模型的拟人化，导出「人类标准答案 vs AI 答案」逐题对比</span>
+      <div class="grow"><button class="btn sm" onclick="examEnter()">刷新</button></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <h3>一键开始考试</h3>
+        <span class="tag" id="examModelTag">当前模型：—</span>
+        <div class="grow"><button class="btn sm primary" id="examStartBtn" onclick="examStart(this)">开始考试</button></div>
+      </div>
+      <div class="row">
+        <div style="flex:1 1 150px">
+          <label class="f">模式</label>
+          <select id="examMode">
+            <option value="all">全部（评论 + 发帖 + 楼中楼）</option>
+            <option value="comment">仅评论</option>
+            <option value="post">仅发帖</option>
+            <option value="reply">仅楼中楼</option>
+            <option value="both">评论 + 发帖</option>
+          </select>
+        </div>
+        <div style="flex:1 1 130px">
+          <label class="f">样本数（0 = 考卷默认量）</label>
+          <input type="number" id="examN" value="0" min="0" step="1">
+        </div>
+        <div style="flex:1 1 130px">
+          <label class="f">候选数（best-of-N 重排）</label>
+          <select id="examCand">
+            <option value="1">1（关闭）</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="margin-top:14px;border-top:1px solid var(--line);padding-top:13px">
+        <div class="card-h" style="margin-bottom:9px"><h3 style="font-size:13px">临时模型（可选，留空则用当前配置）</h3></div>
+        <div class="row">
+          <div style="flex:1.2 1 190px"><label class="f">base_url</label><input type="text" id="examBase" placeholder="https://api.example.com/v1" autocomplete="off"></div>
+          <div style="flex:1 1 150px"><label class="f">model</label><input type="text" id="examModel" placeholder="模型名" autocomplete="off"></div>
+          <div style="flex:1 1 170px"><label class="f">api_key</label><input type="password" id="examKey" placeholder="仅本次考试使用，不保存" autocomplete="new-password"></div>
+        </div>
+        <div class="exam-note" style="margin-top:8px">
+          默认直接考 <b id="examCurModel" style="color:var(--text)">当前配置模型</b>。临时 key 仅经服务端内存传给子进程，
+          <b>不回显、不写 localStorage、不落盘、不进日志与导出文件</b>；提交后会立即清空该输入框。
+        </div>
+      </div>
+
+      <div id="examProg" style="display:none;margin-top:14px">
+        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--dim)">
+          <span id="examStage">准备中…</span><span id="examPct">0%</span>
+        </div>
+        <div class="exam-bar-wrap"><i id="examBar"></i></div>
+        <div class="exam-log" id="examLog"></div>
+      </div>
+    </div>
+
+    <div class="card" id="examScoreCard" style="display:none">
+      <div class="card-h"><h3>成绩表</h3><span class="tag" id="examScoreTag">—</span></div>
+      <div class="exam-scores" id="examScores"></div>
+      <div class="exam-note" style="margin-top:8px">
+        总分 = 图灵(40) + 分布/题材(25) + 同质化/形式(20) + AI味(15)；被抓率越低越拟人。
+        逐题图灵判定（被抓次数 / 投票数）来自 exam_answers.json 真实落盘；分项得分为汇总级，逐题分项标「无」。
+      </div>
+    </div>
+
+    <div class="card" id="examCmpCard" style="display:none">
+      <div class="card-h">
+        <h3>答卷逐题对比</h3>
+        <span class="tag" id="examCmpTag">—</span>
+        <div class="grow exam-export">
+          <button class="btn sm primary" onclick="examExport('zip')">导出 ZIP（全包）</button>
+          <button class="btn sm" onclick="examExport('json')">JSON</button>
+          <button class="btn sm" onclick="examExport('csv')">对比 CSV</button>
+          <button class="btn sm" onclick="examExport('md')">成绩单 MD</button>
+        </div>
+      </div>
+      <div class="exam-note" style="margin-bottom:10px">
+        ZIP 内含：试卷.json（题目 + 人类标准答案）、答卷.json（AI 答案 + 逐题图灵判定 + 分数）、
+        对比.csv（逐题 6 列：题号/模式/题目/人类标准答案/AI答案/是否被抓=被抓数/票数）、
+        成绩单.md（汇总表 + 图灵对照表）。post 模式真人帖为「风格参照」，已标注非唯一标准答案。
+        所有导出均不含密钥与账号凭据。
+      </div>
+      <div class="exam-cmp-wrap">
+        <table class="exam-tb" id="examCmpTable">
+          <thead><tr>
+            <th style="width:46px">题号</th><th style="width:72px">模式</th>
+            <th style="width:24%">试卷题目（真实帖子 / 板块）</th>
+            <th style="width:28%">人类标准答案（真人原句）</th>
+            <th style="width:28%">AI 答案</th>
+            <th style="width:120px">图灵判定 / 被抓票</th>
+          </tr></thead>
+          <tbody id="examCmpBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
   <!-- ========== 日志 ========== -->
   <section class="page" id="page-sync">
     <div class="page-head">
@@ -718,7 +854,7 @@ const $ = s => document.querySelector(s);
 const $$ = s => document.querySelectorAll(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-let S = null, curTab = 'overview', contentKind = 'posts', logTimer = null;
+let S = null, curTab = 'overview', contentKind = 'posts', logTimer = null, _examTimer = null;
 
 function toast(msg, kind='ok'){
   const t = $('#toast');
@@ -1569,6 +1705,8 @@ function switchTab(name){
   $$('.page').forEach(p=>p.classList.toggle('active', p.id === 'page-'+name));
   clearInterval(logTimer); logTimer = null;
   clearInterval(kbTimer); kbTimer = null;
+  clearTimeout(_examTimer); _examTimer = null;
+  if (name==='exam'){ examEnter(); return; }
   if (name==='logs'){ loadLogs(); logTimer = setInterval(loadLogs, 3000); return; }
   if (name==='review'){ loadReview(); return; }
   if (!S) return;
@@ -1762,6 +1900,197 @@ setTimeout(async () => {
     }
   }catch(e){}
 }, 1500);
+
+/* ================= 考试：一键拟人化测试 + 逐题对比 + 导出 ================= */
+let _examId = null;
+
+async function examEnter(){
+  // 当前配置模型：只回 model / base_url，绝不含 key
+  try{
+    const m = await api('/api/exam/models');
+    const tag = $('#examModelTag');
+    if (tag) tag.textContent = '当前模型：' + (m.model || '未配置') + (m.base_url ? ' @ ' + m.base_url : '');
+    const cur = $('#examCurModel');
+    if (cur) cur.textContent = (m.model || '当前配置模型') + (m.base_url ? '（' + m.base_url + '）' : '');
+  }catch(e){}
+  try{
+    const s = await api('/api/exam/status');
+    if (s && s.running){
+      _examId = s.exam_id || _examId;
+      examShowProg(true); examSetProg(s); pollExam();
+    } else {
+      // 恢复上次考试编号：页面刷新后仍可直接「导出上次答卷」，不用重跑
+      _examId = s.exam_id || _examId;
+      busy($('#examStartBtn'), false);
+      examLoadResult();
+    }
+  }catch(e){}
+}
+
+function examShowProg(on){
+  const p = $('#examProg'); if (p) p.style.display = on ? 'block' : 'none';
+}
+
+function examSetProg(s){
+  const pct = Math.max(0, Math.min(100, s.pct || 0));
+  const bar = $('#examBar'); if (bar) bar.style.width = pct + '%';
+  const pp = $('#examPct'); if (pp) pp.textContent = pct + '%';
+  const st = $('#examStage');
+  if (st) st.textContent = (s.running ? '进行中 · ' : '') + (s.stage || '') + (s.error ? (' · 出错：' + s.error) : '');
+  const log = $('#examLog');
+  if (log){
+    log.innerHTML = (s.log || []).slice(-60).map(x =>
+      '<div>' + esc(x.t) + '  ' + esc(x.text) + '</div>').join('');
+    log.scrollTop = 1e6;
+  }
+}
+
+async function examStart(btn){
+  const payload = {
+    mode: ($('#examMode') && $('#examMode').value) || 'all',
+    n: +(($('#examN') && $('#examN').value) || 0),
+    candidates: +(($('#examCand') && $('#examCand').value) || 1),
+    model: {
+      base_url: (($('#examBase') && $('#examBase').value) || '').trim(),
+      model: (($('#examModel') && $('#examModel').value) || '').trim(),
+      api_key: (($('#examKey') && $('#examKey').value) || '').trim(),
+    },
+  };
+  busy(btn, true);
+  try{
+    const d = await post('/api/exam/run', payload);
+    _examId = d.exam_id;
+    // key 不回显、不写 localStorage、提交后立刻清空输入框
+    const k = $('#examKey'); if (k) k.value = '';
+    examShowProg(true);
+    const bar = $('#examBar'); if (bar) bar.style.width = '0%';
+    const log = $('#examLog'); if (log) log.textContent = '';
+    toast('考试已启动（' + _examId + '），后台跑，不阻塞页面');
+    pollExam();
+  }catch(e){ toast(e.message, 'err'); busy(btn, false); }
+}
+
+function pollExam(){
+  clearTimeout(_examTimer);
+  const q = _examId ? ('?id=' + encodeURIComponent(_examId)) : '';
+  api('/api/exam/status' + q).then(s => {
+    examSetProg(s);
+    if (s.running){
+      _examTimer = setTimeout(pollExam, 1200);
+    } else {
+      busy($('#examStartBtn'), false);
+      toast(s.error ? ('考试出错：' + s.error) : '考试完成', s.error ? 'err' : 'ok');
+      examLoadResult();
+    }
+  }).catch(() => { _examTimer = setTimeout(pollExam, 2500); });
+}
+
+async function examLoadResult(){
+  try{
+    const q = _examId ? ('?id=' + encodeURIComponent(_examId)) : '';
+    const d = await api('/api/exam/result' + q);
+    if (!d) return;                       // 还没跑过，卡片保持隐藏
+    _examId = d.exam_id || _examId;
+    renderExamScores(d.scores || {}, d.meta || {});
+    renderExamCompare(d.questions || []);
+    const tag = $('#examScoreTag'); if (tag) tag.textContent = d.generated_at || '';
+    const ct = $('#examCmpTag');
+    if (ct) ct.textContent = '共 ' + (d.question_count != null ? d.question_count : (d.questions || []).length) + ' 题';
+  }catch(e){ /* 没成绩时静默 */ }
+}
+
+function renderExamScores(scores, meta){
+  const box = $('#examScores'); if (!box) return;
+  const order = ['comment', 'post', 'reply'];
+  const label = {comment:'评论', post:'发帖', reply:'楼中楼'};
+  let html = '';
+  order.forEach(m => {
+    const s = scores[m]; if (!s) return;
+    const cr = s.catch_rate;
+    const isNum = (typeof cr === 'number');
+    const crs = isNum ? (cr * 100).toFixed(1) + '%' : '无';
+    let cls = '', vtxt = '';
+    if (isNum){
+      if (cr < 0.20){ cls = ''; vtxt = '较难识破'; }
+      else if (cr < 0.30){ cls = 'warn'; vtxt = '接近'; }
+      else { cls = 'bad'; vtxt = '易被识破'; }
+    }
+    const p = s.parts || {};
+    const g = k => (p[k] && p[k].v != null) ? esc(p[k].v) : '无';
+    html += `<div class="exam-score">
+      <div class="h"><b>${label[m] || m}</b></div>
+      <div class="tot">${esc(s.total)}<small> / 100</small></div>
+      <div class="grid">
+        <span>图灵(40)：<b>${g('turing')}</b></span>
+        <span>${esc((p.mid && p.mid.label) || '分布/题材(25)')}：<b>${g('mid')}</b></span>
+        <span>${esc((p.third && p.third.label) || '同质/形式(20)')}：<b>${g('third')}</b></span>
+        <span>AI味(15)：<b>${g('flavor')}</b></span>
+        <span>样本量：<b>${esc(s.n)}</b></span>
+        <span>被抓率：<b>${crs}</b></span>
+      </div>
+      ${vtxt ? `<span class="caught ${cls}">图灵判定：${vtxt}（被抓 ${crs}）</span>` : ''}
+    </div>`;
+  });
+  box.innerHTML = html || '<div class="empty">暂无成绩</div>';
+  const card = $('#examScoreCard'); if (card) card.style.display = html ? 'block' : 'none';
+}
+
+function renderExamCompare(questions){
+  const card = $('#examCmpCard'), body = $('#examCmpBody');
+  if (!body) return;
+  if (!questions.length){ if (card) card.style.display = 'none'; return; }
+  const human = v => {
+    if (Array.isArray(v)) return v.length ? v.map(x => esc(x)).join('<br>') : '<span class="exam-na">无</span>';
+    if (v == null || v === '' || v === '无') return '<span class="exam-na">无</span>';
+    return esc(v);
+  };
+  body.innerHTML = questions.map(q => {
+    const qm = q.mode || '';
+    // 题目：reply 附上「对方原句」；post 的人类答案标明是风格参照而非标准答案
+    let qtext = q.question || '无';
+    if (q.their) qtext += '\n【对方说】' + q.their;
+    const isRef = q.human_kind === 'reference';
+    const hHtml = (isRef ? '<span class="exam-na">【风格参照·非标准答案】</span><br>' : '') + human(q.human);
+    const aHtml = (q.ai && q.ai !== '无')
+      ? `<span class="exam-ai">${esc(q.ai)}</span>` : '<span class="exam-na">无</span>';
+    const c = q.turing_caught, v = q.turing_votes;
+    const cv = (typeof c === 'number' && typeof v === 'number') ? `${c}/${v}` : '无';
+    const vHtml = (q.verdict && q.verdict !== '无')
+      ? `${esc(q.verdict)}<br><span class="exam-qid">被抓 ${cv}</span>`
+      : '<span class="exam-na">无（0 票有效）</span>';
+    return `<tr>
+      <td class="exam-qid">#${esc(q.qid)}</td>
+      <td><span class="exam-mode ${qm}">${esc(qm)}</span></td>
+      <td><div class="exam-cell-scroll">${esc(qtext)}</div></td>
+      <td><div class="exam-cell-scroll exam-human">${hHtml}</div></td>
+      <td><div class="exam-cell-scroll">${aHtml}</div></td>
+      <td>${vHtml}</td>
+    </tr>`;
+  }).join('');
+  if (card) card.style.display = 'block';
+}
+
+async function examExport(fmt){
+  if (!_examId) return toast('先跑一次考试', 'err');
+  const url = '/api/exam/export?id=' + encodeURIComponent(_examId) + '&fmt=' + encodeURIComponent(fmt);
+  try{
+    const r = await fetch(url);
+    // 服务端成功会带 X-Exam-Export:1；否则是 {ok:false,error} 的报错
+    if (!r.ok || r.headers.get('X-Exam-Export') !== '1'){
+      let msg = '导出失败';
+      try { const j = await r.json(); msg = j.error || msg; } catch(e){}
+      throw new Error(msg);
+    }
+    const blob = await r.blob();
+    const cd = r.headers.get('Content-Disposition') || '';
+    const mm = /filename="?([^"]+)"?/.exec(cd);
+    const fn = mm ? mm[1] : ('exam.' + fmt);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fn; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  }catch(e){ toast(e.message, 'err'); }
+}
 </script>
 </body>
 </html>

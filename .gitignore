@@ -27,3 +27,9 @@ Thumbs.db
 
 # 含真实用户名的界面截图，不进公开仓库
 app/docs/screen-*.png
+
+# 考试答卷/真人样本含真实 UGC，禁止进公开仓库
+bot/tools/exam_answers*.json
+bot/tools/graph_refs.json
+bot/tools/*_last.json
+bot/tools/README_TABLES.md

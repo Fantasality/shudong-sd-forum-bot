@@ -126,6 +126,87 @@ def _spawn_progress(done: int, total: int, text: str, ok: bool) -> None:
             _spawn_state["log"] = _spawn_state["log"][-300:]
 
 
+# ---------- 拟人化考试：后台线程 + 轮询（照 _spawn 的模式） ----------
+# 临时模型的 key 只存在于 _exam_worker 的局部变量 / 子进程环境变量里，
+# 绝不写进 _exam_state、_exam_results、日志或任何 HTTP 响应。
+_exam_lock = threading.Lock()
+_exam_state: dict = {
+    "running": False, "exam_id": None, "pct": 0, "stage": "",
+    "log": [], "result": None, "error": None,
+}
+_exam_results: dict[str, dict] = {}          # exam_id -> 完整 result（内存，最多留 10 场）
+_exam_mod_cache: dict = {}
+
+
+def _exam_mod():
+    """按需加载 tools/exam.py，不污染 sys.path、不在启动时连带 import。"""
+    if "m" not in _exam_mod_cache:
+        import importlib.util
+        p = BASE / "tools" / "exam.py"
+        spec = importlib.util.spec_from_file_location("szlike_exam", str(p))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        _exam_mod_cache["m"] = m
+    return _exam_mod_cache["m"]
+
+
+def _exam_get_result(exam_id: str | None = None):
+    """优先取内存里本次会话的成绩；服务重启后内存为空时，
+    用磁盘上 eval_run.py 落盘的 tools/exam_answers.json 兜一张「上次答卷」，
+    让 WebUI 的「导出上次答卷」不用重跑考试。"""
+    with _exam_lock:
+        if exam_id and exam_id in _exam_results:
+            return _exam_results[exam_id]
+        if _exam_results:
+            return list(_exam_results.values())[-1]
+        mem = _exam_state.get("result")
+    if mem:
+        return mem
+    try:
+        return _exam_mod().result_from_answers_file(BASE / "tools" / "exam_answers.json")
+    except Exception:
+        return None
+
+
+def _exam_worker(exam_id: str, mode: str, n: int, candidates: int,
+                 llm_override: dict | None) -> None:
+    key = str((llm_override or {}).get("key") or (llm_override or {}).get("api_key") or "")
+
+    def progress(pct: int, text: str) -> None:
+        if key and len(key) >= 8:             # 双保险：进度文本里也不允许出现 key
+            text = text.replace(key, "***")
+        with _exam_lock:
+            _exam_state["pct"] = int(pct)
+            _exam_state["stage"] = str(text)[:160]
+            _exam_state["log"].append({"t": time.strftime("%H:%M:%S"),
+                                       "text": str(text)[:200]})
+            if len(_exam_state["log"]) > 200:
+                del _exam_state["log"][:-200]
+
+    try:
+        m = _exam_mod()
+        result = m.run_exam(mode, n, candidates, llm_override, progress)
+        result = m.sanitize(result)           # 入内存前再兜一层，确保结果绝不含 key
+        result["exam_id"] = exam_id
+        with _exam_lock:
+            _exam_results[exam_id] = result
+            if len(_exam_results) > 10:       # 只留最近 10 场，避免无限占内存
+                _exam_results.pop(next(iter(_exam_results)), None)
+            _exam_state["result"] = result
+            _exam_state["pct"] = 100
+            _exam_state["stage"] = "完成"
+            _exam_state["error"] = None
+    except Exception as e:
+        log.error("exam 失败：%s", traceback.format_exc(limit=3))
+        with _exam_lock:
+            _exam_state["error"] = f"{type(e).__name__}: {e}"
+            _exam_state["stage"] = "出错"
+            _exam_state["pct"] = 100
+    finally:
+        with _exam_lock:
+            _exam_state["running"] = False
+
+
 def get_brain(d: dict) -> Brain:
     """同一个 LLM 配置复用同一个 Brain，保住 keep-alive 连接（省掉每次 TLS 握手）。"""
     llm = d.get("llm") or {}
@@ -942,12 +1023,16 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         return
 
-    def _send(self, code: int, body: bytes, ctype: str) -> None:
+    def _send(self, code: int, body: bytes, ctype: str,
+              extra_headers: dict | None = None) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -1030,6 +1115,67 @@ class Handler(BaseHTTPRequestHandler):
                     snap = json.loads(json.dumps(_spawn_state, ensure_ascii=False))
                 return self._json({"ok": True, "data": snap})
 
+            # ---------- 拟人化考试 ----------
+            if path == "/api/exam/models":
+                # 只回当前配置的 model 名与 base_url，绝不回 key
+                try:
+                    raw = load(str(CFG_PATH), with_defaults=False)
+                except Exception:
+                    raw = {}
+                llm = (raw.get("llm") or cfg.data.get("llm") or {})
+                return self._json({"ok": True, "data": {
+                    "model": llm.get("model") or "",
+                    "base_url": llm.get("base_url") or "",
+                }})
+
+            if path == "/api/exam/status":
+                with _exam_lock:
+                    snap = {
+                        "running": _exam_state["running"],
+                        "exam_id": _exam_state["exam_id"],
+                        "pct": _exam_state["pct"],
+                        "stage": _exam_state["stage"],
+                        "log": list(_exam_state["log"])[-60:],
+                        "error": _exam_state["error"],
+                        "scores": (_exam_state["result"] or {}).get("scores"),
+                    }
+                return self._json({"ok": True, "data": snap})
+
+            if path == "/api/exam/result":
+                exam_id = (qs.get("id") or [None])[0]
+                result = _exam_get_result(exam_id)
+                if not result:
+                    return self._json({"ok": True, "data": None})
+                clean = _exam_mod().sanitize(result)   # 回包前再脱敏，绝不把 key 发到前端
+                return self._json({"ok": True, "data": {
+                    "exam_id": clean.get("exam_id"),
+                    "generated_at": clean.get("generated_at"),
+                    "meta": clean.get("meta"),
+                    "scores": clean.get("scores"),
+                    "summary": clean.get("summary"),
+                    "question_count": len(clean.get("questions") or []),
+                    "questions": clean.get("questions") or [],
+                }})
+
+            if path == "/api/exam/export":
+                exam_id = (qs.get("id") or [None])[0]
+                fmt = (qs.get("fmt") or ["zip"])[0].lower()
+                result = _exam_get_result(exam_id)
+                if not result:
+                    return self._err("还没有考试结果，先点「开始考试」", 404)
+                m = _exam_mod()
+                try:
+                    data = m.export_exam(result, fmt)
+                except ValueError as e:
+                    return self._err(str(e), 400)
+                except Exception as e:
+                    return self._err(f"导出失败：{type(e).__name__}: {e}", 500)
+                fn = m.export_filename(result, fmt)
+                return self._send(200, data, m.CTYPES.get(fmt, "application/octet-stream"), {
+                    "Content-Disposition": 'attachment; filename="%s"' % fn,
+                    "X-Exam-Export": "1",
+                })
+
             return self._err("not found: " + path, 404)
 
         except Exception as e:
@@ -1111,6 +1257,36 @@ class Handler(BaseHTTPRequestHandler):
 
                 threading.Thread(target=_run, daemon=True).start()
                 return self._json({"ok": True, "data": {"started": n}})
+
+            if path == "/api/exam/run":
+                # 后台线程启动考试，HTTP 立即返回 exam_id，不阻塞。
+                with _exam_lock:
+                    if _exam_state["running"]:
+                        return self._err("正在考试，等这一场跑完")
+                    exam_id = secrets.token_hex(6)
+                    _exam_state.update(running=True, exam_id=exam_id, pct=0,
+                                       stage="排队中", log=[],
+                                       result=_exam_state.get("result"), error=None)
+                mode = str(body.get("mode") or "all")
+                if mode not in ("all", "both", "comment", "post", "reply"):
+                    mode = "all"
+                n = max(0, int(body.get("n") or 0))
+                candidates = max(1, min(5, int(body.get("candidates") or 1)))
+                model = body.get("model") or {}
+                # key 只在这里进内存，随后经环境变量交给子进程；不回显、不落盘。
+                llm_override = {
+                    "base": str(model.get("base_url") or "").strip(),
+                    "model": str(model.get("model") or "").strip(),
+                    "key": str(model.get("api_key") or "").strip(),
+                }
+                if not any(llm_override.values()):
+                    llm_override = None
+
+                def _run_exam() -> None:
+                    _exam_worker(exam_id, mode, n, candidates, llm_override)
+
+                threading.Thread(target=_run_exam, daemon=True).start()
+                return self._json({"ok": True, "data": {"exam_id": exam_id}})
 
             if path == "/api/register":
                 return self._json({"ok": True, "data": register_account(body)})
